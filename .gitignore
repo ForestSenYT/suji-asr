@@ -82,6 +82,9 @@ models/
 tokens.txt                # 随模型下载,非源码
 # 预编译 sherpa-onnx SDK / 解压目录
 sherpa-onnx-*/
+# 下载的 SDK / 工具(ffmpeg, cmake)/ CUDA·cuDNN redist 与 wheel(大二进制,另行下载,勿入库)
+vendor/
+*.whl
 
 # ---------------- 媒体输入 & 转写输出(数据,切勿入库)----------------
 # 讲课视频 / 音频(体积大)
