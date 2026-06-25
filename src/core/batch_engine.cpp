@@ -62,6 +62,7 @@ std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& i
       std::vector<Asr::SegView> views; views.reserve(batch.size());
       for(auto& b : batch) views.push_back({b.samples.data(),(int)b.samples.size()});
       auto res = asr.transcribe_batch(views);
+      if (res.size() != batch.size()) continue;   // defensive: skip malformed batch (transcribe_batch returns one per seg by contract)
       for(size_t i=0;i<batch.size();++i){
         double base = (double)batch[i].start_sample/16000.0;
         for(size_t k=0;k<res[i].tokens.size() && k<res[i].timestamps.size();++k){
@@ -79,15 +80,15 @@ std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& i
   // finalize per file (single-threaded): sort tokens by time -> merge -> punctuate
   Punctuator punct(cfg);
   for(int i=0;i<N;i++){
-    if(!results[i].ok) continue;
-    auto& toks = file_tokens[i];
-    std::sort(toks.begin(), toks.end(), [](const Token&a,const Token&b){ return a.start<b.start; });
-    Transcript tr;
-    tr.segments = merge_tokens(toks, cfg.merge_gap, cfg.merge_max_dur);
-    for(auto& seg : tr.segments){ seg.text = punct.add(seg.text); tr.full_text += seg.text; }
-    if(tr.segments.empty() && toks.empty()){ /* no speech detected -- still ok=true, empty */ }
-    results[i].transcript = std::move(tr);
-    files_done++;
+    if(results[i].ok){
+      auto& toks = file_tokens[i];
+      std::sort(toks.begin(), toks.end(), [](const Token&a,const Token&b){ return a.start<b.start; });
+      Transcript tr;
+      tr.segments = merge_tokens(toks, cfg.merge_gap, cfg.merge_max_dur);
+      for(auto& seg : tr.segments){ seg.text = punct.add(seg.text); tr.full_text += seg.text; }
+      results[i].transcript = std::move(tr);
+    }
+    files_done++;                                  // count every file (ok or failed)
     if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; cb(bp); }
   }
   return results;

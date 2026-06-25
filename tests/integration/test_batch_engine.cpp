@@ -19,8 +19,10 @@ TEST_CASE("batch isolates a bad file" * doctest::timeout(300)){
   std::string w=md()+"/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/";
   std::vector<std::string> inputs={ w+"0.wav", "no_such_file.wav", w+"1.wav" };
   AutoTune tune; tune.provider=Provider::Cpu; tune.batch=4; tune.in_flight_files=2; tune.num_threads=4;
-  auto res = transcribe_batch_files(inputs, cfg(), tune);
+  int last_done = 0;
+  auto res = transcribe_batch_files(inputs, cfg(), tune, [&](const BatchProgress& b){ last_done = b.files_done; });
   REQUIRE(res.size()==3);
   CHECK(res[0].ok); CHECK_FALSE(res[1].ok); CHECK(res[2].ok);   // bad file isolated
   CHECK(res[1].err.size()>0);
+  CHECK(last_done == 3);   // progress counts ALL files incl. the failed one
 }
