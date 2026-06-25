@@ -103,10 +103,10 @@ vendor/
 *.ogg
 *.opus
 # 输出目录与字幕(.md/.json 不按扩展名忽略,避免误伤 README/配置 —— 统一放输出目录)
-outputs/
-output/
-transcripts/
-results/
+/outputs/
+/output/
+/transcripts/
+/results/
 *.srt
 *.vtt
 # 需要提交一个小测试样本时:  git add -f tests/data/sample.wav
