@@ -4,6 +4,8 @@
 #include "core/config.h"
 #include "core/asr.h"
 #include "core/log.h"
+#include <algorithm>
+#include <set>
 #include <string>
 #include <vector>
 #include <chrono>
@@ -22,7 +24,7 @@ static bool is_media(const fs::path& p) {
     ".m4a", ".mp3", ".wav", ".flac", ".aac", ".ogg", ".opus"
   };
   std::string e = p.extension().string();
-  for (auto& ch : e) ch = (char)tolower(ch);
+  for (auto& ch : e) ch = (char)tolower((unsigned char)ch);
   for (auto x : ext) if (e == x) return true;
   return false;
 }
@@ -85,10 +87,6 @@ int main(int argc, char** argv) {
   log_info("hw: gpu=" + std::string(hw.has_cuda_gpu ? hw.gpu_name : "none")
     + " cores=" + std::to_string(hw.cpu_threads)
     + " ramMB=" + std::to_string(hw.ram_free_mb));
-  log_info("tune: provider=" + std::string(provider_str(tune.provider))
-    + " batch=" + std::to_string(tune.batch)
-    + " in_flight=" + std::to_string(tune.in_flight_files)
-    + " files=" + std::to_string(inputs.size()));
 
   // Safe CUDA: only attempt CUDA when --cuda-dll-dir is explicitly provided,
   // or when --provider cuda was explicit without --cuda-dll-dir (do a probe first).
@@ -102,7 +100,7 @@ int main(int argc, char** argv) {
       probe_cfg.provider = Provider::Cuda;
       Asr probe(probe_cfg);
       if (!probe.ok()) {
-        log_info("CUDA unavailable (init failed), falling back to CPU");
+        log_err("CUDA unavailable (init failed), falling back to CPU");
         tune.provider  = Provider::Cpu;
         c.cuda_dll_dir = {};
       } else {
@@ -111,10 +109,20 @@ int main(int argc, char** argv) {
     } else {
       // No cuda_dll_dir supplied: skip CUDA attempt to avoid potential crash
       // (CUDA runtime DLLs not guaranteed on PATH; empirical behavior: may crash).
-      log_info("CUDA selected but --cuda-dll-dir not provided; falling back to CPU for safety");
+      log_err("CUDA selected but --cuda-dll-dir not provided; falling back to CPU for safety");
       tune.provider = Provider::Cpu;
     }
   }
+
+  // Fix 1: recompute CPU threads after any flip to CPU
+  if (tune.provider == Provider::Cpu) tune.num_threads = std::max(4, hw.cpu_threads);
+
+  // Fix 2: log the FINAL tune AFTER fallback and thread recomputation
+  log_info("tune: provider=" + std::string(provider_str(tune.provider))
+    + " batch=" + std::to_string(tune.batch)
+    + " in_flight=" + std::to_string(tune.in_flight_files)
+    + " threads=" + std::to_string(tune.num_threads)
+    + " files=" + std::to_string(inputs.size()));
 
   // Apply final provider to engine config
   c.provider    = tune.provider;
@@ -130,10 +138,16 @@ int main(int argc, char** argv) {
   // Write outputs + tally
   fs::create_directories(out_dir);
   int okc = 0;
+  std::set<std::string> used_bases;
   for (auto& r : res) {
     if (r.ok) {
       okc++;
-      write_outputs(r.transcript, out_dir + "/" + stem(r.input), c, stem(r.input));
+      std::string base = out_dir + "/" + stem(r.input);
+      std::string b = base; int n = 2;
+      while (used_bases.count(b)) { b = base + "_" + std::to_string(n++); }
+      used_bases.insert(b);
+      if (b != base) log_err("output stem collision for '" + r.input + "' -> writing as " + b);
+      write_outputs(r.transcript, b, c, stem(r.input));
     } else {
       log_err("FAILED " + r.input + ": " + r.err);
     }
