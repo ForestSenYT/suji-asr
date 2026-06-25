@@ -15,12 +15,15 @@ endif()
 add_library(sherpa_onnx_c SHARED IMPORTED GLOBAL)
 set_target_properties(sherpa_onnx_c PROPERTIES
   IMPORTED_IMPLIB "${SUJI_VENDOR_DIR}/lib/sherpa-onnx-c-api.lib"
-  IMPORTED_LOCATION "${SUJI_VENDOR_DIR}/bin/sherpa-onnx-c-api.dll"
+  IMPORTED_LOCATION "${SUJI_VENDOR_DIR}/lib/sherpa-onnx-c-api.dll"
   INTERFACE_INCLUDE_DIRECTORIES "${SUJI_VENDOR_DIR}/include")
 
-# 把 sherpa bin/*.dll 拷到目标 exe 同目录的函数
+# 把 sherpa 运行期 DLL 拷到目标 exe 同目录。
+# 注意:sherpa-onnx-c-api.dll 与 cargs.dll 只在 lib/(bin/ 缺这两个);
+# lib/ 是完整集(含 onnxruntime + 各 provider),故拷 lib/。
+# (GPU 的 CUDA/cuDNN redist DLL 由 Phase 2 / 打包阶段另行处理。)
 function(suji_copy_runtime_dlls target)
   add_custom_command(TARGET ${target} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${SUJI_VENDOR_DIR}/bin" "$<TARGET_FILE_DIR:${target}>"
-    COMMENT "Copying sherpa-onnx runtime DLLs next to ${target}")
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${SUJI_VENDOR_DIR}/lib" "$<TARGET_FILE_DIR:${target}>"
+    COMMENT "Copying sherpa-onnx runtime DLLs (lib/) next to ${target}")
 endfunction()
