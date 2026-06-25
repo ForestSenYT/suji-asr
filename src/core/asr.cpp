@@ -35,4 +35,30 @@ AsrResult Asr::transcribe(const float* samples, int n) {
   SherpaOnnxDestroyOfflineStream(st);
   return out;
 }
+std::vector<AsrResult> Asr::transcribe_batch(const std::vector<SegView>& segs){
+  std::vector<AsrResult> out(segs.size());
+  if(!rec_ || segs.empty()) return out;
+  std::vector<const SherpaOnnxOfflineStream*> streams;
+  streams.reserve(segs.size());
+  for(auto& s : segs){
+    const SherpaOnnxOfflineStream* st = SherpaOnnxCreateOfflineStream(rec_);
+    SherpaOnnxAcceptWaveformOffline(st, 16000, s.samples, s.n);
+    streams.push_back(st);
+  }
+  SherpaOnnxDecodeMultipleOfflineStreams(rec_, streams.data(), (int)streams.size());
+  for(size_t i=0;i<streams.size();++i){
+    const SherpaOnnxOfflineRecognizerResult* r = SherpaOnnxGetOfflineStreamResult(streams[i]);
+    if(r){
+      if(r->text) out[i].text=r->text;
+      int count=r->count;
+      for(int k=0;k<count;++k){
+        out[i].tokens.push_back(r->tokens_arr && r->tokens_arr[k] ? r->tokens_arr[k] : "");
+        out[i].timestamps.push_back(r->timestamps ? (double)r->timestamps[k] : 0.0);
+      }
+      SherpaOnnxDestroyOfflineRecognizerResult(r);
+    }
+    SherpaOnnxDestroyOfflineStream(streams[i]);
+  }
+  return out;
+}
 }
