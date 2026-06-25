@@ -1,12 +1,12 @@
 #include "core/asr.h"
 #include "sherpa-onnx/c-api/c-api.h"
 #include <cstring>
+#include <string>
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
-#endif
 namespace suji {
 static std::wstring widen(const std::string& s) {
   if (s.empty()) return {};
@@ -15,6 +15,9 @@ static std::wstring widen(const std::string& s) {
   MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), n);
   return w;
 }
+#else
+namespace suji {
+#endif
 Asr::Asr(const EngineConfig& cfg) {
 #ifdef _WIN32
   if (cfg.provider == Provider::Cuda && !cfg.cuda_dll_dir.empty()) {
