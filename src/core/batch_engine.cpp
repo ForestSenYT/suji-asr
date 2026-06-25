@@ -14,7 +14,7 @@ namespace {
 struct SegTask { int file_id; int64_t start_sample; std::vector<float> samples; };
 }
 std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& inputs,
-    const EngineConfig& cfg, const AutoTune& tune, ProgressCb cb){
+    const EngineConfig& cfg, const AutoTune& tune, ProgressCb cb, CancelToken* cancel){
   const int N=(int)inputs.size();
   std::vector<FileResult> results(N);
   for(int i=0;i<N;i++){ results[i].input=inputs[i]; results[i].ok=true; }
@@ -40,6 +40,7 @@ std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& i
     producers.emplace_back([&]{
       size_t fi;
       while((fi=next_file.fetch_add(1)) < (size_t)N){
+        if(cancel && cancel->is_cancelled()) break;   // stop taking new files on cancel
         AudioBuffer ab; std::string err;
         if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err)){
           { std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="decode: "+err; }
@@ -56,6 +57,7 @@ std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& i
   std::thread consumer([&]{
     SegTask first;
     while(queue.pop(first)){
+      if(cancel && cancel->is_cancelled()){ queue.close(); break; }  // close releases blocked producers
       std::vector<SegTask> batch; batch.push_back(std::move(first));
       SegTask more;
       while((int)batch.size() < tune.batch && queue.try_pop(more)) batch.push_back(std::move(more));
