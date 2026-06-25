@@ -7,6 +7,10 @@ if(NOT EXISTS "${SUJI_VENDOR_DIR}/include/sherpa-onnx/c-api/c-api.h")
   message(FATAL_ERROR "sherpa-onnx SDK not found at ${SUJI_VENDOR_DIR} (run Phase 0 downloads)")
 endif()
 
+if(NOT EXISTS "${SUJI_VENDOR_DIR}/lib/sherpa-onnx-c-api.lib")
+  message(FATAL_ERROR "sherpa-onnx import lib not found at ${SUJI_VENDOR_DIR}/lib/sherpa-onnx-c-api.lib (run Phase 0 downloads/extract)")
+endif()
+
 # Imported target: sherpa-onnx C API
 add_library(sherpa_onnx_c SHARED IMPORTED GLOBAL)
 set_target_properties(sherpa_onnx_c PROPERTIES
