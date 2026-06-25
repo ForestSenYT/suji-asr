@@ -4,6 +4,7 @@
 #include "core/config.h"
 #include <thread>
 #include <chrono>
+#include <algorithm>
 using namespace suji;
 
 TEST_CASE("cancel returns promptly without deadlock" * doctest::timeout(60)) {
@@ -37,4 +38,7 @@ TEST_CASE("cancel returns promptly without deadlock" * doctest::timeout(60)) {
     worker.join();  // must return (timeout fails if deadlock)
 
     CHECK(res.size() == inputs.size());  // returned one result per input
+    // cancellation must have had an effect: at least one file marked cancelled
+    CHECK(std::any_of(res.begin(), res.end(),
+          [](const FileResult& r){ return !r.ok && r.err == "cancelled"; }));
 }

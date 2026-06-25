@@ -82,6 +82,9 @@ std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& i
   // finalize per file (single-threaded): sort tokens by time -> merge -> punctuate
   Punctuator punct(cfg);
   for(int i=0;i<N;i++){
+    if (cancel && cancel->is_cancelled() && results[i].ok && file_tokens[i].empty()) {
+      results[i].ok = false; results[i].err = "cancelled";
+    }
     if(results[i].ok){
       auto& toks = file_tokens[i];
       std::sort(toks.begin(), toks.end(), [](const Token&a,const Token&b){ return a.start<b.start; });
