@@ -32,7 +32,7 @@ bool transcribe_file(const EngineConfig& cfg, const std::string& input,
     for (const auto& s : segs) {
         auto r = asr.transcribe(s.samples.data(), static_cast<int>(s.samples.size()));
         double base = static_cast<double>(s.start_sample) / 16000.0;
-        for (size_t i = 0; i < r.tokens.size(); ++i) {
+        for (size_t i = 0; i < r.tokens.size() && i < r.timestamps.size(); ++i) {
             Token tk;
             tk.text  = r.tokens[i];
             tk.start = base + r.timestamps[i];
