@@ -57,6 +57,41 @@
 
 ### 许可证 — **PENDING**:FireRedASR 代码条款 vs 权重条款(转自 ModelScope)分别核实。
 
+## Phase 1 实现
+
+### ITN 状态 (Phase 1)
+
+**`--rule-fsts` 接线:✅ 完成**
+- CLI `--rule-fsts <f>` 参数已连接到 `EngineConfig.rule_fsts`(Task 11)。
+- recognizer 读取 `config.rule_fsts` 并在非空时挂载 FST;空值时 ITN 关闭(所有单元/集成测试通过)。
+- 接线已验证,无需 C++ 修改。
+
+**候选 zh-ITN FST 来源(均 404 或无标记发布)**:
+- `https://github.com/k2-fsa/sherpa-onnx/releases/download/itn-models/itn_zh_number.fst` → 404
+- `https://github.com/k2-fsa/sherpa-onnx/releases/download/itn-models/itn_zh.fst` → 404
+- `https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/master/scripts/itn/itn_zh_number.fst` → 404
+- k2-fsa/sherpa-onnx releases 中无 `itn` 标记发布;FST 资产名/位置待确认。
+
+**决策:Phase 1 保持 ITN 关闭**
+- 数字保留口语形式(如"二零二六"不转换为"2026")。
+- CT-Transformer 标点仍应用(不受影响)。
+- Phase 1 目标是验收流程正确性(VAD、ASR、标点、输出格式),不阻塞 ITN 有无。
+- 产品级 ITN 待后续环节(获取/构建正确的 zh-ITN FST,验证内置 FST 质量)。
+
+**开发期对照工具**:
+- `scripts/itn_compare.py`:dev-time 脚本(不入产品),读取 stdin(无 ITN 的 ASR 输出),输出 wetext 标准化形式(ITN)。
+  ```bash
+  pip install wetext
+  type build\no_itn\1.md | python scripts/itn_compare.py
+  ```
+- 用于比对内置 FST ITN vs wetext ITN,判断 FST 质量是否满足业务需求。
+
+**后续**:
+1. 从 WeTextProcessing FAR 或确认的资产源获取 zh-ITN FST。
+2. 放入 `vendor/itn_zh_number.fst`,启用 `--rule-fsts vendor/itn_zh_number.fst`。
+3. 用真实讲课文件(含数字、日期、特殊词)验证内置 FST vs `itn_compare.py`(wetext) 的输出,确认 FST 足以生产。
+4. 若 FST 质量不达要求,评估集成 wetext 或采用 sherpa 预构建 FST 的其他来源。
+
 ## 待核实
 1. sherpa-onnx GPU Windows 发布资产名 + 所需 CUDA/cuDNN(研究 pending)。
 2. 模型确切下载 URL(GitHub + ModelScope 镜像)。
