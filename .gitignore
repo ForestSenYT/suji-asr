@@ -55,7 +55,7 @@ CMakeUserPresets.json     # 个人 preset(团队的 CMakePresets.json 仍入库)
 *.pdb
 *.idb
 *.dSYM/
-core
+/core
 vgcore.*
 
 # CUDA 中间产物
@@ -136,11 +136,15 @@ ENV/
 *.log
 logs/
 tmp/
+.superpowers/             # subagent-driven-dev scratch (ledger / briefs / review diffs)
 .tmp/
 *.tmp
 *.bak
 *.swp
 *~
+# 测试/CLI e2e 在工作目录写的临时产物
+test_*_tmp.*
+cli_e2e_out.*
 
 # ---------------- 操作系统 / 编辑器杂物 ----------------
 .DS_Store
