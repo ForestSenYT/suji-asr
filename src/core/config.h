@@ -17,6 +17,8 @@ struct EngineConfig {
   int vad_window = 512;
   // 段落重建
   double merge_gap = 1.0, merge_max_dur = 30.0;
+  // GPU helper – if set, AddDllDirectory is called before CUDA init (Windows only)
+  std::string cuda_dll_dir;
   // 输出开关
   bool out_srt=true, out_vtt=true, out_json=true, out_md=true;
 };

@@ -23,6 +23,11 @@ add_executable(suji_cli src/cli/main.cpp)
 target_link_libraries(suji_cli PRIVATE suji_core)
 suji_copy_runtime_dlls(suji_cli)
 
+# Batch CLI
+add_executable(suji_batch src/cli/batch_main.cpp)
+target_link_libraries(suji_batch PRIVATE suji_core)
+suji_copy_runtime_dlls(suji_batch)
+
 # 测试
 enable_testing()
 file(GLOB_RECURSE SUJI_TEST_SRC CONFIGURE_DEPENDS tests/*.cpp)
