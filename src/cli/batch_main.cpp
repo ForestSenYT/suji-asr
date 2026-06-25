@@ -4,6 +4,7 @@
 #include "core/config.h"
 #include "core/asr.h"
 #include "core/log.h"
+#include "core/resume.h"
 #include <algorithm>
 #include <set>
 #include <string>
@@ -31,7 +32,7 @@ static bool is_media(const fs::path& p) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda] [--batch N] [--in-flight N] [--cuda-dll-dir <path>]");
+    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda] [--batch N] [--in-flight N] [--cuda-dll-dir <path>] [--resume|--no-resume]");
     return 2;
   }
 
@@ -49,6 +50,7 @@ int main(int argc, char** argv) {
   int         fbatch    = 0;
   int         finflight = 0;
   std::string cuda_dll_dir;
+  bool        resume    = true;
   std::vector<std::string> inputs;
 
   for (int i = 1; i < argc; ++i) {
@@ -58,6 +60,8 @@ int main(int argc, char** argv) {
     else if (a == "--batch"       && i + 1 < argc) fbatch       = atoi(argv[++i]);
     else if (a == "--in-flight"   && i + 1 < argc) finflight    = atoi(argv[++i]);
     else if (a == "--cuda-dll-dir"&& i + 1 < argc) cuda_dll_dir = argv[++i];
+    else if (a == "--resume")     resume = true;
+    else if (a == "--no-resume")  resume = false;
     else if (a.size() > 2 && a[0] == '-' && a[1] == '-') {
       log_err("unknown flag " + a);
       return 2;
@@ -74,6 +78,23 @@ int main(int argc, char** argv) {
   }
 
   if (inputs.empty()) { log_err("no input media files"); return 1; }
+
+  // Resume partition: skip already-complete outputs
+  std::vector<std::string> todo;
+  int skipped = 0;
+  for (auto& in : inputs) {
+    std::string base = out_dir + "/" + stem(in);
+    if (resume && transcript_complete(base, c)) {
+      ++skipped;
+      log_info("resume: skip (done) " + in);
+    } else {
+      todo.push_back(in);
+    }
+  }
+  if (todo.empty()) {
+    std::printf("nothing to do: %d already complete (resumed)\n", skipped);
+    return 0;
+  }
 
   // Hardware auto-tune
   HardwareInfo hw   = probe_hardware();
@@ -114,30 +135,39 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Fix 1: recompute CPU threads after any flip to CPU
+  // Recompute CPU threads after any flip to CPU
   if (tune.provider == Provider::Cpu) tune.num_threads = std::max(4, hw.cpu_threads);
+  // D8: recompute batch for CPU (GPU-decided value may be too large for CPU)
+  if (tune.provider == Provider::Cpu) tune.batch = std::min(4, std::max(1, hw.cpu_threads / 4));
 
-  // Fix 2: log the FINAL tune AFTER fallback and thread recomputation
+  // Log the FINAL tune AFTER fallback and recomputation
   log_info("tune: provider=" + std::string(provider_str(tune.provider))
     + " batch=" + std::to_string(tune.batch)
     + " in_flight=" + std::to_string(tune.in_flight_files)
     + " threads=" + std::to_string(tune.num_threads)
-    + " files=" + std::to_string(inputs.size()));
+    + " files=" + std::to_string(todo.size()));
 
   // Apply final provider to engine config
   c.provider    = tune.provider;
   c.num_threads = tune.num_threads;
 
   auto t0 = std::chrono::steady_clock::now();
-  auto res = transcribe_batch_files(inputs, c, tune, [](const BatchProgress& b) {
-    std::fprintf(stderr, "\r[%d/%d] %.0fs audio done", b.files_done, b.files_total, b.audio_seconds_done);
+  double last_audio = 0.0;
+  auto res = transcribe_batch_files(todo, c, tune, [&](const BatchProgress& b) {
+    last_audio = b.audio_seconds_done;
+    double el  = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    double eta = b.files_done > 0
+      ? el * static_cast<double>(b.files_total - b.files_done) / static_cast<double>(b.files_done)
+      : 0.0;
+    std::fprintf(stderr, "\r[%d/%d] %.0fs audio, ETA %dm%02ds   ",
+      b.files_done, b.files_total, b.audio_seconds_done,
+      static_cast<int>(eta) / 60, static_cast<int>(eta) % 60);
   });
-  auto t1   = std::chrono::steady_clock::now();
-  double wall = std::chrono::duration<double>(t1 - t0).count();
+  double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   // Write outputs + tally
   fs::create_directories(out_dir);
-  int okc = 0;
+  int okc = 0, failc = 0;
   std::set<std::string> used_bases;
   for (auto& r : res) {
     if (r.ok) {
@@ -149,9 +179,11 @@ int main(int argc, char** argv) {
       if (b != base) log_err("output stem collision for '" + r.input + "' -> writing as " + b);
       write_outputs(r.transcript, b, c, stem(r.input));
     } else {
+      failc++;
       log_err("FAILED " + r.input + ": " + r.err);
     }
   }
-  std::printf("\ndone: %d/%zu ok, wall=%.1fs\n", okc, res.size(), wall);
-  return okc > 0 ? 0 : 1;
+  std::printf("\ndone: %d/%zu ok, skipped(resumed)=%d, failed=%d, wall=%.1fs, throughput=%.1fx realtime\n",
+    okc, todo.size(), skipped, failc, wall, wall > 0 ? last_audio / wall : 0.0);
+  return (okc > 0 || skipped > 0) ? 0 : 1;
 }
