@@ -2,6 +2,7 @@
 #include <QObject>
 #include <QStringList>
 #include <QString>
+#include <atomic>
 #include "core/cancel.h"
 
 namespace suji {
@@ -14,7 +15,7 @@ public:
 public slots:
     void run(QStringList inputs, QString outDir, QString provider,
              bool srt, bool vtt, bool json, bool md);
-    void requestCancel(); // thread-safe: sets the cancel token
+    void requestCancel(); // thread-safe: direct atomic store, callable from any thread
 
 signals:
     void progress(int filesDone, int filesTotal, double audioSec);
@@ -23,6 +24,7 @@ signals:
 
 private:
     CancelToken cancel_;
+    std::atomic<bool> running_{false}; // re-entrancy guard
 };
 
 } // namespace suji

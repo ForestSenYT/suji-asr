@@ -26,6 +26,17 @@ static std::string stem(const std::string& p) {
 void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
                        bool srt, bool vtt, bool json, bool md)
 {
+    // Re-entrancy guard: reject concurrent calls (e.g. double-click Start)
+    bool expected = false;
+    if (!running_.compare_exchange_strong(expected, true))
+        return;
+
+    // RAII guard to reset running_ on all exit paths
+    struct RunGuard {
+        std::atomic<bool>& flag;
+        ~RunGuard() { flag.store(false); }
+    } runGuard{running_};
+
     cancel_.cancelled.store(false);
 
     // ------------------------------------------------------------------

@@ -305,7 +305,7 @@ void MainWindow::onStart()
 void MainWindow::onCancel()
 {
     setStatusText(tr("正在取消…"));
-    QMetaObject::invokeMethod(worker_, "requestCancel", Qt::QueuedConnection);
+    if (worker_) worker_->requestCancel();   // direct atomic store; thread-safe, takes effect immediately
 }
 
 // ---------------------------------------------------------------------------
@@ -391,11 +391,11 @@ void MainWindow::dropEvent(QDropEvent* event)
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    // Signal cancel and wait for worker thread to drain before closing
-    if (worker_)
-        QMetaObject::invokeMethod(worker_, "requestCancel", Qt::QueuedConnection);
+    // Direct cancel: the atomic store reaches the blocked worker thread immediately.
+    // Unbounded wait() is safe because the direct cancel makes run() return within seconds.
+    if (worker_) worker_->requestCancel();
     workerThread_->quit();
-    workerThread_->wait(5000); // 5 second timeout
+    workerThread_->wait(); // unbounded — direct cancel ensures run() returns promptly
     QMainWindow::closeEvent(event);
 }
 
