@@ -40,7 +40,13 @@ add_test(NAME suji_tests COMMAND suji_tests)
 find_package(Qt6 COMPONENTS Widgets QUIET)
 if(Qt6_FOUND)
   qt_standard_project_setup()
-  qt_add_executable(suji_gui src/gui/main.cpp src/gui/main_window.cpp src/gui/main_window.h)
+  qt_add_executable(suji_gui
+    src/gui/main.cpp
+    src/gui/main_window.cpp
+    src/gui/main_window.h
+    src/gui/engine_worker.cpp
+    src/gui/engine_worker.h
+  )
   target_link_libraries(suji_gui PRIVATE suji_core Qt6::Widgets)
   target_include_directories(suji_gui PRIVATE src)
   suji_copy_runtime_dlls(suji_gui)

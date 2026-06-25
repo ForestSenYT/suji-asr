@@ -9,13 +9,17 @@ class QLabel;
 class QComboBox;
 class QCheckBox;
 class QPushButton;
+class QThread;
 
 namespace suji {
+
+class EngineWorker;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
 
     // Getters for Task 4 wiring
     QStringList inputFiles() const;
@@ -41,9 +45,15 @@ public slots:
     void onStart();
     void onCancel();
 
+    // Worker signal handlers
+    void onWorkerProgress(int filesDone, int filesTotal, double audioSec);
+    void onWorkerFileResult(QString path, bool ok, int segments, QString err);
+    void onWorkerFinished(int ok, int failed, int cancelled, double wallSec);
+
 protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
 
 private:
     void addInputFile(const QString& path);
@@ -64,6 +74,13 @@ private:
     QPushButton*        m_btnCancel   = nullptr;
     QLabel*             m_outDirLabel = nullptr;
     QString             m_outputDir;
+
+    // Worker thread (Task 4)
+    QThread*       workerThread_ = nullptr;
+    EngineWorker*  worker_       = nullptr;
+
+    // Timing for throughput display
+    std::chrono::steady_clock::time_point m_startTime;
 };
 
 } // namespace suji

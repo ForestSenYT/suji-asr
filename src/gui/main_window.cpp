@@ -1,25 +1,31 @@
 #include "gui/main_window.h"
+#include "gui/engine_worker.h"
 
 #include <QAction>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
+#include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QDir>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QMetaObject>
 #include <QMimeData>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QStandardItemModel>
 #include <QTableView>
+#include <QThread>
 #include <QToolBar>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#include <chrono>
 
 namespace suji {
 
@@ -182,6 +188,35 @@ MainWindow::MainWindow(QWidget* parent)
     bottomLayout->addLayout(actionRow);
 
     rootLayout->addWidget(bottomWidget);
+
+    // ------------------------------------------------------------------
+    // Worker thread setup (Task 4)
+    // ------------------------------------------------------------------
+    workerThread_ = new QThread(this);
+    worker_       = new EngineWorker();
+    worker_->moveToThread(workerThread_);
+
+    connect(worker_, &EngineWorker::progress,
+            this,    &MainWindow::onWorkerProgress);
+    connect(worker_, &EngineWorker::fileResult,
+            this,    &MainWindow::onWorkerFileResult);
+    connect(worker_, &EngineWorker::finished,
+            this,    &MainWindow::onWorkerFinished);
+
+    // Clean up worker object when thread finishes
+    connect(workerThread_, &QThread::finished,
+            worker_,       &QObject::deleteLater);
+
+    workerThread_->start();
+}
+
+// ---------------------------------------------------------------------------
+// Destructor
+// ---------------------------------------------------------------------------
+MainWindow::~MainWindow()
+{
+    workerThread_->quit();
+    workerThread_->wait();
 }
 
 // ---------------------------------------------------------------------------
@@ -224,13 +259,107 @@ void MainWindow::onChooseOutputDir()
 
 void MainWindow::onStart()
 {
-    // STUB — engine wiring in Task 4
-    m_statusLabel->setText(tr("(engine wiring 在 Task 4)"));
+    const QStringList files = inputFiles();
+    if (files.isEmpty()) {
+        setStatusText(tr("请先添加文件"));
+        return;
+    }
+
+    // Determine output directory: use chosen dir or default "out"
+    QString outDir = m_outputDir;
+    if (outDir.isEmpty()) {
+        outDir = QStringLiteral("out");
+        m_outDirLabel->setText(outDir);
+    }
+    QDir().mkpath(outDir);
+
+    // Reset UI state
+    m_btnStart->setEnabled(false);
+    m_btnCancel->setEnabled(true);
+    m_progress->setValue(0);
+
+    // Reset all row statuses to "待处理"
+    for (int r = 0; r < m_model->rowCount(); ++r) {
+        setRowStatus(r, tr("待处理"));
+        if (auto* item = m_model->item(r, ColSegs)) item->setText(QString());
+        setRowError(r, QString());
+    }
+    setStatusText(tr("正在初始化…"));
+
+    m_startTime = std::chrono::steady_clock::now();
+
+    // Invoke worker on its thread via queued connection
+    QMetaObject::invokeMethod(
+        worker_, "run",
+        Qt::QueuedConnection,
+        Q_ARG(QStringList, files),
+        Q_ARG(QString,     outDir),
+        Q_ARG(QString,     provider()),
+        Q_ARG(bool,        wantSrt()),
+        Q_ARG(bool,        wantVtt()),
+        Q_ARG(bool,        wantJson()),
+        Q_ARG(bool,        wantMd())
+    );
 }
 
 void MainWindow::onCancel()
 {
-    // STUB — engine wiring in Task 4
+    setStatusText(tr("正在取消…"));
+    QMetaObject::invokeMethod(worker_, "requestCancel", Qt::QueuedConnection);
+}
+
+// ---------------------------------------------------------------------------
+// Worker signal handlers
+// ---------------------------------------------------------------------------
+void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec)
+{
+    if (filesTotal > 0)
+        m_progress->setValue(100 * filesDone / filesTotal);
+
+    double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - m_startTime).count();
+    double throughput = (elapsed > 0.0) ? (audioSec / elapsed) : 0.0;
+
+    setStatusText(tr("处理中 %1/%2  %3 倍速")
+        .arg(filesDone)
+        .arg(filesTotal)
+        .arg(throughput, 0, 'f', 1));
+}
+
+void MainWindow::onWorkerFileResult(QString path, bool ok, int segments, QString err)
+{
+    // Find the row whose Qt::UserRole data matches the path
+    const int n = m_model->rowCount();
+    for (int r = 0; r < n; ++r) {
+        if (m_model->item(r, ColFile)->data(Qt::UserRole).toString() == path) {
+            if (ok) {
+                setRowStatus(r, tr("完成"));
+                setRowSegments(r, segments);
+            } else if (err == QStringLiteral("cancelled")) {
+                setRowStatus(r, tr("取消"));
+            } else {
+                setRowStatus(r, tr("失败"));
+                setRowError(r, err);
+            }
+            return;
+        }
+    }
+}
+
+void MainWindow::onWorkerFinished(int ok, int failed, int cancelled, double wallSec)
+{
+    m_progress->setValue(100);
+    m_btnStart->setEnabled(true);
+    m_btnCancel->setEnabled(false);
+
+    double elapsed = (wallSec > 0.0) ? wallSec : 1.0;
+    setStatusText(
+        tr("完成: %1 成功  %2 失败  %3 取消  %4 秒")
+            .arg(ok)
+            .arg(failed)
+            .arg(cancelled)
+            .arg(elapsed, 0, 'f', 1)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +387,16 @@ void MainWindow::dropEvent(QDropEvent* event)
             addInputFile(localPath);
     }
     event->acceptProposedAction();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    // Signal cancel and wait for worker thread to drain before closing
+    if (worker_)
+        QMetaObject::invokeMethod(worker_, "requestCancel", Qt::QueuedConnection);
+    workerThread_->quit();
+    workerThread_->wait(5000); // 5 second timeout
+    QMainWindow::closeEvent(event);
 }
 
 // ---------------------------------------------------------------------------
