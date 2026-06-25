@@ -92,6 +92,19 @@
 3. 用真实讲课文件(含数字、日期、特殊词)验证内置 FST vs `itn_compare.py`(wetext) 的输出,确认 FST 足以生产。
 4. 若 FST 质量不达要求,评估集成 wetext 或采用 sherpa 预构建 FST 的其他来源。
 
+### 输出格式 schema 说明 (Phase 1)
+
+**JSON `tokens[]` vs `text` / `full_text` 语义**
+
+- 每段 `tokens[]` 是 FireRedASR2-CTC 输出的**原始字符级识别单元**,携带逐 token 时间戳(PRE-punctuation)。
+- 每段 `text` 及顶层 `full_text` 是经 CT-Transformer 标点模型处理后的**可读字符串**(POST-punctuation)。
+- 因此 **`tokens[].t` 拼接 ≠ `text`**:标点符号由标点模型插入于 token 之间,本身不携带时间戳。此设计**有意且正确**:
+  - `tokens[]` 服务于时序/对齐用途(字幕打点、跳转定位)。
+  - `text` / `full_text` 服务于人类阅读。
+- **Phase 2+ 后续**:若需要标点对齐的逐 token 流,届时将标点重新分配到相邻 token;Phase 1 不做此重分配。
+
+(此数据契约细节由最终 whole-branch review 标记为 Important,决议为文档化而非 Phase 1 代码修改。)
+
 ## 待核实
 1. sherpa-onnx GPU Windows 发布资产名 + 所需 CUDA/cuDNN(研究 pending)。
 2. 模型确切下载 URL(GitHub + ModelScope 镜像)。

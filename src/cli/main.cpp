@@ -36,9 +36,11 @@ int main(int argc, char** argv){
     else if (a=="--no-vtt") c.out_vtt=false;
     else if (a=="--no-json") c.out_json=false;
     else if (a=="--no-md") c.out_md=false;
+    else { log_err(std::string("unknown argument '")+a+"'"); return 2; }
   }
   std::error_code ec;
   std::filesystem::create_directories(out_dir, ec);
+  if (ec && !std::filesystem::exists(out_dir)) { log_err("cannot create output dir '"+out_dir+"': "+ec.message()); return 1; }
   Transcript t; std::string err;
   log_info("transcribing: " + input);
   if (!transcribe_file(c, input, t, err)){ log_err("failed: "+err); return 1; }
