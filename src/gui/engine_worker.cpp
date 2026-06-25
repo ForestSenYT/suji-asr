@@ -4,6 +4,7 @@
 #include "core/hardware.h"
 #include "core/config.h"
 #include "core/output/writer_facade.h"
+#include "core/paths.h"
 
 #include <QDir>
 #include <QString>
@@ -40,12 +41,12 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     cancel_.cancelled.store(false);
 
     // ------------------------------------------------------------------
-    // Build EngineConfig from compile-time defaults (same as suji_batch)
+    // Build EngineConfig from relocatable paths (app-relative, dev fallback)
     // ------------------------------------------------------------------
     EngineConfig c;
-    std::string mdl = SUJI_DEFAULT_MODELS_DIR;
+    std::string mdl = models_dir();
     std::string m   = mdl + "/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/";
-    c.ffmpeg_path = SUJI_DEFAULT_FFMPEG;
+    c.ffmpeg_path = ffmpeg_path();
     c.asr_model   = m   + "model.int8.onnx";
     c.tokens      = m   + "tokens.txt";
     c.vad_model   = mdl + "/silero_vad.onnx";

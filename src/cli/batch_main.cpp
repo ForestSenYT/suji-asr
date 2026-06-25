@@ -2,6 +2,7 @@
 #include "core/batch_engine.h"
 #include "core/output/writer_facade.h"
 #include "core/config.h"
+#include "core/paths.h"
 #include "core/asr.h"
 #include "core/log.h"
 #include "core/resume.h"
@@ -37,9 +38,9 @@ int main(int argc, char** argv) {
   }
 
   EngineConfig c;
-  std::string mdl = SUJI_DEFAULT_MODELS_DIR;
+  std::string mdl = models_dir();
   std::string m = mdl + "/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/";
-  c.ffmpeg_path = SUJI_DEFAULT_FFMPEG;
+  c.ffmpeg_path = ffmpeg_path();
   c.asr_model   = m + "model.int8.onnx";
   c.tokens      = m + "tokens.txt";
   c.vad_model   = mdl + "/silero_vad.onnx";
