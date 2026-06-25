@@ -20,6 +20,7 @@ AsrResult Asr::transcribe(const float* samples, int n) {
   AsrResult out;
   if (!rec_) return out;
   const SherpaOnnxOfflineStream* st = SherpaOnnxCreateOfflineStream(rec_);
+  if (!st) return out;
   SherpaOnnxAcceptWaveformOffline(st, 16000, samples, n);
   SherpaOnnxDecodeOfflineStream(rec_, st);
   const SherpaOnnxOfflineRecognizerResult* r = SherpaOnnxGetOfflineStreamResult(st);
@@ -42,6 +43,10 @@ std::vector<AsrResult> Asr::transcribe_batch(const std::vector<SegView>& segs){
   streams.reserve(segs.size());
   for(auto& s : segs){
     const SherpaOnnxOfflineStream* st = SherpaOnnxCreateOfflineStream(rec_);
+    if (!st) {
+      for (auto* p : streams) SherpaOnnxDestroyOfflineStream(p);
+      return out;
+    }
     SherpaOnnxAcceptWaveformOffline(st, 16000, s.samples, s.n);
     streams.push_back(st);
   }
