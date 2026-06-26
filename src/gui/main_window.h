@@ -95,6 +95,10 @@ private:
 
     // Timing for throughput display
     std::chrono::steady_clock::time_point m_startTime;
+    // Transcription-phase timing: 倍速 excludes the init/decode/VAD startup so it
+    // reflects the real transcription speed, not a startup-dragged average.
+    std::chrono::steady_clock::time_point m_transStartTime;
+    double m_transStartAudio = -1.0;   // -1 => transcription not started yet this run
 };
 
 } // namespace suji

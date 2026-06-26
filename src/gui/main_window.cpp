@@ -324,6 +324,7 @@ void MainWindow::onStart()
     setStatusText(tr("正在初始化…"));
 
     m_startTime = std::chrono::steady_clock::now();
+    m_transStartAudio = -1.0;   // reset transcription-phase anchor for this run
 
     // Invoke worker on its thread via queued connection
     QMetaObject::invokeMethod(
@@ -368,9 +369,16 @@ void MainWindow::onWorkerStarted(QString provider, int filesTotal)
 
 void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec)
 {
-    double elapsed = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - m_startTime).count();
-    double throughput = (elapsed > 0.0) ? (audioSec / elapsed) : 0.0;
+    auto now = std::chrono::steady_clock::now();
+    // First progress callback = transcription has begun; anchor here so 倍速
+    // reflects the real transcription rate, not the init/decode/VAD startup that
+    // otherwise drags the early average down (the misleading "0.8x").
+    if (m_transStartAudio < 0.0) { m_transStartTime = now; m_transStartAudio = audioSec; }
+    double transElapsed = std::chrono::duration<double>(now - m_transStartTime).count();
+    double overall      = std::chrono::duration<double>(now - m_startTime).count();
+    double throughput = (transElapsed > 1.0)
+        ? (audioSec - m_transStartAudio) / transElapsed     // steady-state transcription speed
+        : ((overall > 0.0) ? audioSec / overall : 0.0);     // brief fallback before the window builds
 
     int pct = (totalAudioSec > 0.5)
               ? std::min(99, static_cast<int>(100.0 * audioSec / totalAudioSec))
