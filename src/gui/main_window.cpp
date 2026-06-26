@@ -318,13 +318,19 @@ void MainWindow::onWorkerStarted(QString provider, int filesTotal)
     setStatusText(tr("正在用 %1 转写 %2 个文件…")
         .arg(provider.toUpper())
         .arg(filesTotal));
+
+    // Flip every pending row to "in-progress"
+    const int n = m_model->rowCount();
+    for (int r = 0; r < n; ++r) {
+        if (m_model->item(r, ColStatus)->text() == tr("待处理"))
+            setRowStatus(r, tr("处理中"));
+    }
+    // Indeterminate mode: min==max==0 makes Qt show a busy animation
+    m_progress->setRange(0, 0);
 }
 
 void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec)
 {
-    if (filesTotal > 0)
-        m_progress->setValue(100 * filesDone / filesTotal);
-
     double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - m_startTime).count();
     double throughput = (elapsed > 0.0) ? (audioSec / elapsed) : 0.0;
@@ -357,6 +363,8 @@ void MainWindow::onWorkerFileResult(QString path, bool ok, int segments, QString
 
 void MainWindow::onWorkerFinished(int ok, int failed, int cancelled, double wallSec)
 {
+    // Restore determinate mode before setting value
+    m_progress->setRange(0, 100);
     m_progress->setValue(100);
     m_btnStart->setEnabled(true);
     m_btnCancel->setEnabled(false);
