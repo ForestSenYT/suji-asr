@@ -11,6 +11,8 @@
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QBrush>
+#include <QColor>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -129,6 +131,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_table->setColumnWidth(ColSegs,   60);
     m_table->setColumnWidth(ColErr,    200);
     m_table->verticalHeader()->setVisible(false);
+    m_table->verticalHeader()->setDefaultSectionSize(27);  // taller rows for readability
 
     // -----------------------------------------------------------------------
     // Log panel — splitter below the file table
@@ -153,6 +156,7 @@ MainWindow::MainWindow(QWidget* parent)
     // Bottom panel
     // -----------------------------------------------------------------------
     auto* bottomWidget = new QWidget(this);
+    bottomWidget->setObjectName(QStringLiteral("bottomWidget"));
     auto* bottomLayout = new QVBoxLayout(bottomWidget);
     bottomLayout->setContentsMargins(0, 0, 0, 0);
     bottomLayout->setSpacing(4);
@@ -222,6 +226,8 @@ MainWindow::MainWindow(QWidget* parent)
     actionRow->addStretch();
     m_btnStart  = new QPushButton(tr("开始"), bottomWidget);
     m_btnCancel = new QPushButton(tr("取消"), bottomWidget);
+    m_btnStart->setObjectName(QStringLiteral("btnStart"));
+    m_btnCancel->setObjectName(QStringLiteral("btnCancel"));
     m_btnCancel->setEnabled(false);
     m_btnStart->setMinimumWidth(80);
     m_btnCancel->setMinimumWidth(80);
@@ -648,6 +654,7 @@ void MainWindow::addInputFile(const QString& path)
     itemFile->setToolTip(path);
 
     auto* itemStatus = new QStandardItem(tr("待处理"));
+    itemStatus->setForeground(QBrush(QColor(0x70, 0x73, 0x7d)));  // muted gray
     auto* itemSegs   = new QStandardItem(QString());
     auto* itemErr    = new QStandardItem(QString());
 
@@ -743,8 +750,21 @@ void MainWindow::setStatusText(const QString& text)
 
 void MainWindow::setRowStatus(int row, const QString& status)
 {
-    if (auto* item = m_model->item(row, ColStatus))
-        item->setText(status);
+    auto* item = m_model->item(row, ColStatus);
+    if (!item) return;
+    item->setText(status);
+
+    // Per-status foreground: muted=待处理, accent blue=处理中, green=完成,
+    //                        red=失败, amber=取消.
+    QColor fg;
+    if      (status == tr("待处理")) fg = QColor(0x70, 0x73, 0x7d);  // muted gray
+    else if (status == tr("处理中")) fg = QColor(0x4a, 0x9e, 0xff);  // accent blue
+    else if (status == tr("完成"))   fg = QColor(0x3f, 0xb9, 0x50);  // green
+    else if (status == tr("失败"))   fg = QColor(0xf8, 0x51, 0x49);  // red
+    else if (status == tr("取消"))   fg = QColor(0xd2, 0x99, 0x22);  // amber
+    else                             fg = QColor(0xe6, 0xe6, 0xe6);  // default light
+
+    item->setForeground(QBrush(fg));
 }
 
 void MainWindow::setRowSegments(int row, int segs)
