@@ -13,7 +13,7 @@ static std::string stem(const std::string& p){
   return (b==std::string::npos||b<s)?p.substr(s):p.substr(s,b-s);
 }
 int main(int argc, char** argv){
-  if (argc < 2){ std::puts("usage: suji_cli <input> [-o out_dir] [--provider cpu|cuda] [--rule-fsts f.fst] [--no-srt|--no-vtt|--no-json|--no-md]"); return 2; }
+  if (argc < 2){ std::puts("usage: suji_cli <input> [-o out_dir] [--provider cpu|cuda|hetero] [--rule-fsts f.fst] [--no-srt|--no-vtt|--no-json|--no-md]"); return 2; }
   EngineConfig c;
   std::string md = models_dir(), m = md+"/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/";
   c.ffmpeg_path=ffmpeg_path(); c.asr_model=m+"model.int8.onnx"; c.tokens=m+"tokens.txt";
@@ -29,7 +29,8 @@ int main(int argc, char** argv){
       std::string prov=argv[++i];
       if (prov=="cuda") c.provider=Provider::Cuda;
       else if (prov=="cpu") c.provider=Provider::Cpu;
-      else { log_err("unknown provider '"+prov+"' (use cpu|cuda)"); return 2; }
+      else if (prov=="hetero"){ log_info("hetero has no effect on a single file; using CPU"); c.provider=Provider::Cpu; }
+      else { log_err("unknown provider '"+prov+"' (use cpu|cuda|hetero)"); return 2; }
     } else if (a=="--rule-fsts"){
       if (i+1>=argc){ log_err("'--rule-fsts' requires an argument"); return 2; }
       c.rule_fsts=argv[++i];
