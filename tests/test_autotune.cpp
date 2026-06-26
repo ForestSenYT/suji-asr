@@ -139,13 +139,13 @@ TEST_CASE("autotune hetero R1 regression: C=16 ram=40000 exact values") {
 // ---- H4: fill_hetero() produces the same tunables as decide()'s hetero branch ----
 
 // fill_hetero(t, hw) must agree with decide() when hardware qualifies for hetero.
-// Primary assertion: C=16, 40 GB free VRAM (gpu_free_mb=6000 -> headroom=4500 ->
-//   gpu_batch=clamp(4500/150,8,32)=30), 40 GB RAM.
+// Primary assertion: C=16, 40 GB free VRAM (gpu_free_mb=6000 -> headroom=4000 (2000MB reserved) ->
+//   gpu_batch=clamp(4000/150,8,32)=clamp(26,8,32)=26), 40 GB RAM.
 TEST_CASE("fill_hetero: synthetic C=16 40GB gpu produces correct tunables") {
   HardwareInfo h;
   h.cpu_threads           = 16;
   h.has_cuda_gpu          = true;
-  h.gpu_free_mb           = 6000;   // 6000-1500=4500; 4500/150=30; clamp(30,8,32)=30
+  h.gpu_free_mb           = 6000;   // 6000-2000=4000; 4000/150=26; clamp(26,8,32)=26
   h.gpu_total_mb          = 8192;
   h.cuda_runtime_available = true;
   h.ram_free_mb           = 40000;
@@ -161,8 +161,8 @@ TEST_CASE("fill_hetero: synthetic C=16 40GB gpu produces correct tunables") {
   CHECK(t.cpu_asr_threads == 11);
   // cpu_batch = clamp(11/2,2,6) = clamp(5,2,6) = 5
   CHECK(t.cpu_batch == 5);
-  // gpu_batch = clamp((6000-1500)/150, 8, 32) = clamp(30, 8, 32) = 30
-  CHECK(t.gpu_batch == 30);
+  // gpu_batch = clamp((6000-2000)/150, 8, 32) = clamp(26, 8, 32) = 26
+  CHECK(t.gpu_batch == 26);
   // postcondition: no oversubscription
   const int gpu_feed = 1;
   CHECK(t.in_flight_files + gpu_feed + t.cpu_asr_threads <= 16);
@@ -207,7 +207,7 @@ TEST_CASE("T5: max_batch=0 leaves batch unchanged (auto)") {
 TEST_CASE("T5: max_batch caps batch") {
   EngineConfig cfg;
   cfg.max_batch = 8;
-  // GPU + 8 cores = Cuda path; uncapped batch=(6000-1500)/150=30 -> capped to 8
+  // GPU + 8 cores = Cuda path; uncapped batch=(6000-2000)/150=26 -> capped to 8
   auto t = decide(hw(true, 6000, 8, 40000, true), cfg);
   CHECK(t.batch <= 8);
 }

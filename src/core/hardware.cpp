@@ -124,7 +124,8 @@ void fill_hetero(AutoTune& t, const HardwareInfo& hw) {
   const int gpu_feed = 1;                         // threads consumed by CUDA consumer
   t.cpu_asr_threads = std::max(2, C - P - gpu_feed);
   t.cpu_batch       = std::clamp(t.cpu_asr_threads / 2, 2, 6);
-  int headroom      = hw.gpu_free_mb - 1500;
+  // Reserve 2000 MB: display framebuffer + CUDA allocator fragmentation headroom.
+  int headroom      = hw.gpu_free_mb - 2000;
   t.gpu_batch       = std::clamp(headroom > 0 ? headroom / 150 : 8, 8, 32);
   t.num_threads     = t.cpu_asr_threads;          // legacy mirror
   t.batch           = t.gpu_batch;                // legacy mirror
@@ -145,8 +146,8 @@ AutoTune decide(const HardwareInfo& hw, const EngineConfig& cfg){
   } else if(gpu_ok){
     t.provider    = Provider::Cuda;
     t.num_threads = 1;
-    // batch starts at 8; scale up by free VRAM, leave ~1.5GB headroom, ~150MB per activation chunk
-    int headroom  = hw.gpu_free_mb - 1500;
+    // batch starts at 8; scale up by free VRAM, leave ~2.0GB headroom (display FB + allocator frag), ~150MB per activation chunk
+    int headroom  = hw.gpu_free_mb - 2000;
     int by_vram   = headroom > 0 ? headroom / 150 : 0;
     t.batch       = std::max(8, std::min(32, by_vram));
     // in-flight files: scale with available RAM (~2GB/file budget), clamped to [2,8]
