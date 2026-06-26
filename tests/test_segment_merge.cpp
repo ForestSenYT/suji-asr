@@ -67,3 +67,68 @@ TEST_CASE("T6: single token segment end = token.start + 0.3") {
   REQUIRE(segs.size() == 1);
   CHECK(segs[0].end == doctest::Approx(1.5 + 0.3));
 }
+
+// ---- <sil>/special-token filtering (int8-CTC leaks silence/special markers) ----
+// int8-CTC emits silence/special tokens (e.g. "< sil >") that must NOT appear in the
+// visible segment text. fp16-AED doesn't emit them, so it's unaffected.
+
+TEST_CASE("SIL: '< sil >' tokens are stripped from segment text") {
+  // Stream mirrors the real leak: DAY AFTER < sil > TO < sil > MOR ...
+  std::vector<Token> toks = {
+    T("DAY",0.0), T("AFTER",0.3), T("< sil >",0.6), T("TO",0.9),
+    T("< sil >",1.2), T("MOR",1.5)
+  };
+  auto segs = merge_tokens(toks, 10.0, 30.0); // big gap -> single segment
+  REQUIRE(segs.size() == 1);
+  CHECK(segs[0].text == "DAYAFTERTOMOR");      // no "< sil >" leaked
+  CHECK(segs[0].text.find("sil") == std::string::npos);
+}
+
+TEST_CASE("SIL: '<sil>' / '<blank>' / empty / whitespace tokens are stripped") {
+  std::vector<Token> toks = {
+    T("hello",0.0), T("<sil>",0.2), T("<blank>",0.4), T("",0.6),
+    T("   ",0.8), T("world",1.0)
+  };
+  auto segs = merge_tokens(toks, 10.0, 30.0);
+  REQUIRE(segs.size() == 1);
+  CHECK(segs[0].text == "helloworld");
+}
+
+TEST_CASE("SIL: any angle-bracketed special token is stripped (conservative)") {
+  std::vector<Token> toks = {
+    T("a",0.0), T("<unk>",0.2), T("b",0.4), T("<s>",0.6), T("c",0.8)
+  };
+  auto segs = merge_tokens(toks, 10.0, 30.0);
+  REQUIRE(segs.size() == 1);
+  CHECK(segs[0].text == "abc");
+}
+
+TEST_CASE("SIL: real content tokens with angle brackets in the middle are kept") {
+  // Only tokens whose TRIMMED text is fully angle-bracketed (^<.*>$) are dropped.
+  // A token like "a<b" or "x>y" is real content and must survive.
+  std::vector<Token> toks = { T("a<b",0.0), T("x>y",0.5) };
+  auto segs = merge_tokens(toks, 10.0, 30.0);
+  REQUIRE(segs.size() == 1);
+  CHECK(segs[0].text == "a<bx>y");
+}
+
+TEST_CASE("SIL: a stream with no special tokens is unchanged") {
+  std::vector<Token> toks = { T(u8"你",0.0),T(u8"好",0.3),T(u8"世",2.0),T(u8"界",2.2) };
+  auto segs = merge_tokens(toks, 1.0, 30.0);
+  REQUIRE(segs.size() == 2);
+  CHECK(segs[0].text == u8"你好");
+  CHECK(segs[1].text == u8"世界");
+}
+
+TEST_CASE("SIL: leading/trailing special tokens still segment + time correctly") {
+  // A "< sil >" at the boundary must not become a segment's start time or text,
+  // and merge/gap logic on the surviving real tokens must still work.
+  std::vector<Token> toks = {
+    T("< sil >",0.0), T("a",0.5), T("b",0.8),
+    T("c",3.0), T("< sil >",3.3)
+  };
+  auto segs = merge_tokens(toks, 1.0, 30.0); // gap 0.8->3.0 = 2.2 > 1.0 -> split
+  REQUIRE(segs.size() == 2);
+  CHECK(segs[0].text == "ab");
+  CHECK(segs[1].text == "c");
+}
