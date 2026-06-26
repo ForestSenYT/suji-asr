@@ -148,3 +148,23 @@
 - 实证:Phase 4 benchmark,GPU(RTX 2080)吞吐 2.85× < CPU 4.95×(GPU 慢 ~1.7×)——典型 CPU EP 回退症状。
 - **结论**:int8 模型在 `provider=cuda` 下实际主要跑 CPU EP,CUDA 路径增加 D2H/H2D 开销未获 GPU 加速收益。fp16 模型预计能真正利用 CUDA EP。
 - **影响**:H1+ 异构引擎设计中,GPU worker 实际吞吐不高于 CPU worker(甚至更低),pull-based work-stealing 的"GPU 快时多拿"假设对本 int8 模型不成立;但两 worker 并行运行仍能聚合两者吞吐之和(扣除竞争)。
+
+## 🚀 大更新 — GUI bug 修复 + 异构 CPU+GPU 引擎 + 收尾 TODO 全清(2026-06-26,均在 main)
+### A. GUI 真机 bug 全修(用户实测发现,branch 已合 main `8c59cac`)
+中文/特殊字符文件名崩溃(`media_decode` 改 CreateProcessW+UTF-16)、卡"待处理"无进度(实时回调+处理中)、看不到日志(日志面板接 core log sink)、进度条无百分比(ffprobe 总时长 + % 写进状态栏)、取消卡死(decode/VAD 可取消,延迟 3.5s→1.3s)、输出文件名乱码(UTF-16 写盘 + UTF-8 安全 stem)、倍速误导(从转写阶段算,剔除启动开销)。
+
+### B. 异构 CPU+GPU 引擎(H0-H9,合 main `deb0b1e`)
+- **H0 gating**:实测证明 CPU+CUDA 双 recognizer 同进程并发安全(per-session 线程数被尊重;int8-on-CUDA 是慢的一半)。
+- 引擎:work-stealing 双消费者共享队列、双 token 分片无锁、优雅降级;R1(超订)、R3(stream 失败静默丢)、R6(取消截断假成功——审查抓到并修)全修。
+- **实测最快**:hetero **3.9× > CPU 3.4× > CUDA 1.8×**(2080;3070 Ti 预期 margin 更大)。`auto` 在 16核+GPU 默认选 hetero。CLI/GUI 可选,日志打印 CPU/GPU 分工比。
+- final review APPROVE。
+
+### C. 收尾 TODO 全清(6 批,合 main `7890214`,133/133 测试)
+T2 nvidia-smi→CreateProcessW、T3 decoding_method 可配、T5 max_batch/max_threads 上限、T6/T7 真字幕结束时间(去 +2s hack)、T8 标点失败日志、T9 写盘失败计入失败、T10 数字参数校验、T11 Vad 每线程一次、T16 续跑结构化判定、T17 模型路径集中、T18 递归扫文件夹、G2 GPU OOM 减半重试、G5 字幕换行、G6 输出去重、G7 GUI 续跑、G9 显存余量、G10 标点可配、G11 GUI 设置持久化、G12 GUI batch/并行控件+ETA、G13 吞吐按整文件算、T4 rule_fars 接线(asset NEEDS-HUMAN)。
+
+### 决策 D12-D14 / 已评估暂缓 / NEEDS-HUMAN
+| D12 | `auto` 在可用 GPU+≥12核 机上默认 hetero(实测最快);可 `--provider cpu` 覆盖 | 实测 3.9×>3.4× | 改 decide() 一行 |
+| D13 | T5 override 设计自主定为 max_batch/max_threads 上限(0=auto) | 最显然安全的约束项 | 删字段 |
+| D14 | T4 ITN 只接线、默认关(无 asset)、不加 GUI 控件 | 讲座数字保口语常 OK + ITN 易误触 | 加 GUI 字段 |
+- **已评估暂缓(低价值/非问题)**:G3(消费者 try_pop 非阻塞,欠满 batch 已即时 flush,无需定时器)、G4(长度分桶,收益边际)、G8(cudaMemGetInfo 需链 cudart;nvidia-smi 已够)、T15(ASR 黄金转写脆弱)。
+- **NEEDS-HUMAN**:① `git push`(本地领先 origin 103 提交)② 3070 Ti 上 benchmark 异构 vs 单引擎 ③ GUI 视觉/交互人工确认 ④ 干净机/3070 Ti 装一次 setup.exe ⑤ ITN FST asset 获取 ⑥ G2 深层 OOM-abort 路径需真显存耗尽验证 ⑦ fp16 模型方向 ⑧ 跨平台(T13,当前 Windows-only by design)。
