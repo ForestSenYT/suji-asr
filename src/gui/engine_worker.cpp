@@ -7,6 +7,7 @@
 #include "core/media_decode.h"
 #include "core/output/writer_facade.h"
 #include "core/paths.h"
+#include "core/resume.h"
 
 #include <QDir>
 #include <QString>
@@ -132,13 +133,43 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     std::filesystem::create_directories(outDirStd);
 
     // ------------------------------------------------------------------
+    // G7: Resume partition — skip files whose outputs are already complete.
+    // Mirrors suji_batch's resume logic in batch_main.cpp.
+    // ------------------------------------------------------------------
+    std::set<std::string> used_bases;  // G6: shared across resumed + transcribed outputs
+
+    std::vector<std::string> todo;
+    // skipped_inputs preserves order so we can emit fileResult for them later
+    std::vector<std::string> skipped_inputs;
+    for (const std::string& f : vec) {
+        std::string base_candidate = outDirStd + "/" + stem(f);
+        // Compute the unique base for this file (G6 dedup across the whole batch).
+        std::string base = base_candidate;
+        int n = 2;
+        while (used_bases.count(base)) { base = base_candidate + "_" + std::to_string(n++); }
+
+        if (transcript_complete(base, c)) {
+            // Reserve the base for this skipped file so later inputs can't collide with it.
+            used_bases.insert(base);
+            skipped_inputs.push_back(f);
+            log_info("resume: skip (done) " + f);
+        } else {
+            // Don't reserve the base here; the results loop will reserve it after
+            // transcription succeeds (prevents false collisions if transcription fails).
+            todo.push_back(f);
+        }
+    }
+    if (!skipped_inputs.empty())
+        log_info("resume: " + std::to_string(skipped_inputs.size()) + " file(s) already complete, skipping");
+
+    // ------------------------------------------------------------------
     // Run transcription
     // ------------------------------------------------------------------
     auto t0 = std::chrono::steady_clock::now();
 
-    // Probe total audio duration for determinate progress
+    // Probe total audio duration for determinate progress (only todo files)
     double totalAudio = 0.0;
-    for (const std::string& f : vec) {
+    for (const std::string& f : todo) {
         if (cancel_.is_cancelled()) break;   // abort probing fast on cancel
         double d = probe_duration_seconds(ffprobe_path(), f);
         if (d > 0.0) totalAudio += d;
@@ -149,7 +180,7 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
                  static_cast<int>(vec.size()));
 
     auto results = transcribe_batch_files(
-        vec, c, tune,
+        todo, c, tune,
         [this, totalAudio](const BatchProgress& b) {
             emit progress(b.files_done, b.files_total, b.audio_seconds_done, totalAudio);
         },
@@ -165,17 +196,29 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     int okCount        = 0;
     int failedCount    = 0;
     int cancelledCount = 0;
-    std::set<std::string> used_bases;  // G6: dedup output stems across the batch
+
+    // G7: Emit "already done" results for skipped (resumed) files.
+    for (const std::string& f : skipped_inputs) {
+        ++okCount;
+        emit fileResult(
+            QString::fromUtf8(f.c_str()),
+            true,
+            /*segments=*/0,    // outputs already exist; segment count not re-read
+            QString()
+        );
+    }
 
     for (const FileResult& r : results) {
         bool wasCancelled = (!r.ok && r.err == "cancelled");
 
         if (r.ok) {
-            // G6: deduplicate output base when two inputs share the same filename
+            // G6: deduplicate output base when two inputs share the same filename.
+            // used_bases was pre-seeded during resume partition, so collisions are
+            // detected even between todo-batch outputs and resumed-file bases.
             std::string base_candidate = outDirStd + "/" + stem(r.input);
             std::string base = base_candidate;
-            int n = 2;
-            while (used_bases.count(base)) { base = base_candidate + "_" + std::to_string(n++); }
+            int nn = 2;
+            while (used_bases.count(base)) { base = base_candidate + "_" + std::to_string(nn++); }
             used_bases.insert(base);
             if (base != base_candidate)
                 log_err("output stem collision for '" + r.input + "' -> writing as " + base);
