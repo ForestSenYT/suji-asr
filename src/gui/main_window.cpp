@@ -19,8 +19,11 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QMetaObject>
+#include <QClipboard>
 #include <QMimeData>
-#include <QPlainTextEdit>
+#include <QScrollBar>
+#include <QTextEdit>
+#include <QTime>
 #include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
@@ -112,6 +115,58 @@ public:
 } // namespace
 
 // ---------------------------------------------------------------------------
+// C2: Pure log-line HTML builder. Exported as static so tests can call it
+// without a widget or Qt event loop. Called from appendLogLine with the real
+// QTime; tests may pass any timestamp string.
+//
+// Color rules (in priority order):
+//   ERR level              -> red (bold)
+//   OK level / msg contains 完成|成功|ok   -> green
+//   phase keywords (解码|切分|转写|fp16|provider|using) -> cyan/blue accent
+//   everything else        -> default (#e0e0e0 on dark, inherits on light)
+//
+// The message is HTML-escaped before wrapping so paths/text with <>&" don't
+// break the markup.
+// ---------------------------------------------------------------------------
+/*static*/ QString MainWindow::logLineHtml(const QString& level, const QString& msg,
+                                            const QString& timestamp)
+{
+    // HTML-escape the message (protect < > & " so paths don't break markup)
+    QString safe = msg.toHtmlEscaped();
+
+    // Determine color
+    QString color;
+    if (level == QStringLiteral("ERR")) {
+        color = QStringLiteral("#f85149");  // red
+    } else if (level == QStringLiteral("OK")
+               || msg.contains(QStringLiteral("完成"))
+               || msg.contains(QStringLiteral("成功"))
+               || msg.toLower().contains(QStringLiteral("ok"))) {
+        color = QStringLiteral("#3fb950");  // green
+    } else if (msg.contains(QStringLiteral("解码"))
+               || msg.contains(QStringLiteral("切分"))
+               || msg.contains(QStringLiteral("转写"))
+               || msg.contains(QStringLiteral("fp16"))
+               || msg.contains(QStringLiteral("provider"))
+               || msg.contains(QStringLiteral("using"))) {
+        color = QStringLiteral("#58a6ff");  // blue accent (phase/provider lines)
+    } else {
+        color = QStringLiteral("#c9d1d9");  // default near-white
+    }
+
+    QString boldOpen, boldClose;
+    if (level == QStringLiteral("ERR")) {
+        boldOpen  = QStringLiteral("<b>");
+        boldClose = QStringLiteral("</b>");
+    }
+
+    // Build: [HH:MM:SS] <colored message>
+    return QStringLiteral("<span style=\"color:#8b949e\">[%1]</span> "
+                          "<span style=\"color:%2\">%3%4%5</span>")
+        .arg(timestamp, color, boldOpen, safe, boldClose);
+}
+
+// ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
 MainWindow::MainWindow(QWidget* parent)
@@ -183,19 +238,47 @@ MainWindow::MainWindow(QWidget* parent)
 
     // -----------------------------------------------------------------------
     // Log panel — splitter below the file table
+    // Log uses QTextEdit (rich text) for timestamp + color-coded lines (C2).
     // -----------------------------------------------------------------------
     auto* splitter = new QSplitter(Qt::Vertical, central);
 
-    m_log = new QPlainTextEdit(splitter);
+    // Log area: QTextEdit (rich/HTML) + small button bar on the right
+    auto* logAreaWidget = new QWidget(splitter);
+    auto* logAreaLayout = new QHBoxLayout(logAreaWidget);
+    logAreaLayout->setContentsMargins(0, 0, 0, 0);
+    logAreaLayout->setSpacing(4);
+
+    m_log = new QTextEdit(logAreaWidget);
     m_log->setReadOnly(true);
-    m_log->setMaximumBlockCount(5000);
+    m_log->document()->setMaximumBlockCount(5000);
     QFont mono(QStringLiteral("Consolas"), 9);
     mono.setStyleHint(QFont::Monospace);
     m_log->setFont(mono);
-    m_log->setPlaceholderText(tr("日志…"));
+    m_log->setAcceptRichText(true);
+
+    // Log control buttons (clear + copy)
+    auto* logBtnCol = new QWidget(logAreaWidget);
+    auto* logBtnLayout = new QVBoxLayout(logBtnCol);
+    logBtnLayout->setContentsMargins(0, 0, 0, 0);
+    logBtnLayout->setSpacing(4);
+    auto* btnLogClear = new QPushButton(tr("清空"), logBtnCol);
+    auto* btnLogCopy  = new QPushButton(tr("复制"), logBtnCol);
+    btnLogClear->setMaximumWidth(52);
+    btnLogCopy->setMaximumWidth(52);
+    logBtnLayout->addWidget(btnLogClear);
+    logBtnLayout->addWidget(btnLogCopy);
+    logBtnLayout->addStretch();
+
+    logAreaLayout->addWidget(m_log, /*stretch=*/1);
+    logAreaLayout->addWidget(logBtnCol, /*stretch=*/0);
+
+    connect(btnLogClear, &QPushButton::clicked, m_log, &QTextEdit::clear);
+    connect(btnLogCopy, &QPushButton::clicked, this, [this](){
+        QApplication::clipboard()->setText(m_log->toPlainText());
+    });
 
     splitter->addWidget(m_table);
-    splitter->addWidget(m_log);
+    splitter->addWidget(logAreaWidget);
     splitter->setSizes({400, 180});
 
     rootLayout->addWidget(splitter, /*stretch=*/1);
@@ -546,6 +629,24 @@ void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec
 }
 
 // ---------------------------------------------------------------------------
+// B: pure helper — derive the per-file phase string from segment counters.
+// segsTotal==0: file is still in decode/VAD ("解码中").
+// 0 < segsDone < segsTotal: transcription underway ("转写中").
+// segsDone==segsTotal (and >0): all segments routed (final 完成/失败/取消 comes
+//   from onWorkerFileResult, so we don't set 完成 here).
+// Returns an empty string when the phase is terminal and should not be overwritten.
+// ---------------------------------------------------------------------------
+static QString filePhaseStr(int segsDone, int segsTotal)
+{
+    if (segsTotal == 0)
+        return QStringLiteral("解码中");
+    if (segsDone < segsTotal)
+        return QStringLiteral("转写中");
+    // segsDone == segsTotal: transcription routed; let fileResult set the terminal state.
+    return QString();
+}
+
+// ---------------------------------------------------------------------------
 // G14: render the bottom status line from the current snapshot. Called by both
 // onWorkerProgress (fresh numbers) and onSecondTick (recomputes elapsed/ETA from
 // the held snapshot) so the line keeps moving even between sparse callbacks.
@@ -626,8 +727,11 @@ void MainWindow::onSecondTick()
 // PER-FILE progress ("每个视频分开"): the worker emits one fileProgress per file
 // per engine callback, keyed by the original input PATH. Find the matching row
 // (same path lookup as onWorkerFileResult), update its 进度 bar + 段数 cell, and
-// flip 待处理 -> 处理中 on the file's first progress. Final 完成/失败/取消 is set by
-// onWorkerFileResult.
+// drive the status column through per-file phases:
+//   待处理 -> 解码中 (segsTotal==0, decode/VAD still running)
+//   解码中 -> 转写中 (0 < segsDone < segsTotal, transcription underway)
+// Terminal states (完成/失败/取消) are set only by onWorkerFileResult — never
+// overwritten here.
 // ---------------------------------------------------------------------------
 void MainWindow::onFileProgress(QString path, int percent, int segsDone, int segsTotal)
 {
@@ -642,10 +746,16 @@ void MainWindow::onFileProgress(QString path, int percent, int segsDone, int seg
                 item->setText(QString::number(segsDone) + QStringLiteral("/")
                             + QString::number(segsTotal));
         }
-        // First progress for a pending file -> 处理中 (final state set by fileResult).
+        // B: drive per-file phase. Only advance non-terminal status cells.
         if (auto* st = m_model->item(r, ColStatus)) {
-            if (st->text() == tr("待处理"))
-                setRowStatus(r, tr("处理中"));
+            const QString cur = st->text();
+            // Never overwrite terminal states set by fileResult.
+            const bool isTerminal = (cur == tr("完成") || cur == tr("失败") || cur == tr("取消"));
+            if (!isTerminal) {
+                const QString phase = filePhaseStr(segsDone, segsTotal);
+                if (!phase.isEmpty())
+                    setRowStatus(r, phase);   // phase is already a final display string
+            }
         }
         return;
     }
@@ -860,10 +970,12 @@ void MainWindow::setRowStatus(int row, const QString& status)
     if (!item) return;
     item->setText(status);
 
-    // Per-status foreground: muted=待处理, accent blue=处理中, green=完成,
+    // Per-status foreground: muted=待处理, phase-blue=解码中/转写中/处理中, green=完成,
     //                        red=失败, amber=取消.
     QColor fg;
     if      (status == tr("待处理")) fg = QColor(0x70, 0x73, 0x7d);  // muted gray
+    else if (status == QStringLiteral("解码中")) fg = QColor(0x58, 0xa6, 0xff);  // cyan-blue (phase)
+    else if (status == QStringLiteral("转写中")) fg = QColor(0x4a, 0x9e, 0xff);  // accent blue (phase)
     else if (status == tr("处理中")) fg = QColor(0x4a, 0x9e, 0xff);  // accent blue
     else if (status == tr("完成"))   fg = QColor(0x3f, 0xb9, 0x50);  // green
     else if (status == tr("失败"))   fg = QColor(0xf8, 0x51, 0x49);  // red
@@ -934,12 +1046,25 @@ QString MainWindow::testLogText() const
 }
 
 // ---------------------------------------------------------------------------
-// Log panel slot
+// C2: Log panel slot — timestamped, color-coded rich-text append.
+// Auto-scrolls to the newest line only when the scrollbar is already at (or
+// very near) the bottom so a user who scrolled up to read isn't yanked back.
 // ---------------------------------------------------------------------------
 void MainWindow::appendLogLine(QString level, QString msg)
 {
     if (!m_log) return;
-    m_log->appendPlainText(QStringLiteral("[%1] %2").arg(level, msg));
+
+    const QString ts = QTime::currentTime().toString(QStringLiteral("HH:mm:ss"));
+    const QString html = logLineHtml(level, msg, ts);
+
+    // Check if scrollbar is near the bottom BEFORE appending (append moves it).
+    QScrollBar* vsb = m_log->verticalScrollBar();
+    const bool atBottom = !vsb || (vsb->value() >= vsb->maximum() - 4);
+
+    m_log->append(html);   // QTextEdit::append adds the HTML as a new paragraph
+
+    if (atBottom && vsb)
+        vsb->setValue(vsb->maximum());
 }
 
 } // namespace suji

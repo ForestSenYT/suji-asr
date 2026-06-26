@@ -2,6 +2,7 @@
 #include <QMainWindow>
 #include <QProgressBar>
 #include <QStringList>
+#include <QString>
 #include <chrono>
 
 class QTableView;
@@ -13,7 +14,7 @@ class QCheckBox;
 class QPushButton;
 class QSpinBox;
 class QThread;
-class QPlainTextEdit;
+class QTextEdit;
 class QTimer;
 
 namespace suji {
@@ -45,11 +46,15 @@ public:
     void setRowError(int row, const QString& err);
     void setRowProgress(int row, int percent);   // per-file progress bar (-1 = unset)
 
+    // Pure helper: build a colored HTML log line (for unit testing without Qt event loop).
+    // Exported as static so tests can call it directly.
+    static QString logLineHtml(const QString& level, const QString& msg, const QString& timestamp);
+
     // Headless test hooks (offscreen --selftest-gui): drive the real interactive path
     void testStart(const QString& file);     // addInputFile + onStart
     QString testRowStatus(int row) const;     // current "状态" cell text
     QString testStatusText() const;           // bottom status label text
-    QString testLogText() const;             // current log panel text
+    QString testLogText() const;             // current log panel text (plain text extraction)
     int testProgressValue() const { return m_progress ? m_progress->value() : -1; }
     int testRowProgress(int row) const;       // current per-file progress % (-1 = unset)
     void testCancel();                        // invoke the real onCancel()
@@ -93,7 +98,7 @@ private:
 
     // Widgets
     QTableView*         m_table       = nullptr;
-    QPlainTextEdit*     m_log         = nullptr;
+    QTextEdit*          m_log         = nullptr;
     QStandardItemModel* m_model       = nullptr;
     QProgressBar*       m_progress    = nullptr;
     QLabel*             m_statusLabel = nullptr;
