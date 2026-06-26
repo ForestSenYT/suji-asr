@@ -7,8 +7,10 @@
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDesktopServices>
 #include <QDir>
 #include <QDragEnterEvent>
+#include <QDragLeaveEvent>
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -17,11 +19,19 @@
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
+#include <QKeySequence>
 #include <QLabel>
+#include <QLinearGradient>
+#include <QMenu>
 #include <QMetaObject>
 #include <QClipboard>
 #include <QMimeData>
+#include <QPen>
+#include <QPixmap>
+#include <QResizeEvent>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QTextEdit>
 #include <QTime>
 #include <QPointer>
@@ -31,9 +41,11 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardItemModel>
+#include <QStyle>
 #include <QStyledItemDelegate>
 #include <QStyleOptionProgressBar>
 #include <QPainter>
+#include <QPainterPath>
 #include <QTableView>
 #include <QThread>
 #include <QTimer>
@@ -80,8 +92,23 @@ enum Col { ColFile = 0, ColStatus = 1, ColProgress = 2, ColSegs = 3, ColErr = 4,
 static constexpr int ProgressRole = Qt::UserRole + 1;
 
 // ---------------------------------------------------------------------------
-// ProgressBarDelegate — paints a horizontal progress bar (with "%" text) in the
-// 进度 column, reflecting the row's ProgressRole value via the platform style.
+// Theme accent palette (D). Kept here as the single source of truth so the
+// custom-painted per-row progress bar matches the QSS accent (the QSS string
+// can't reach a delegate that paints with QPainter directly).
+// ---------------------------------------------------------------------------
+namespace theme {
+    static const QColor kAccent  (0x4c, 0x9a, 0xff);  // calm teal-blue
+    static const QColor kAccentHi(0x63, 0xa9, 0xff);  // accent highlight (gradient top)
+    static const QColor kTrack   (0x2a, 0x2e, 0x3a);  // progress track / header
+    static const QColor kBorder  (0x33, 0x38, 0x45);  // subtle border
+    static const QColor kText     (0xe7, 0xe9, 0xee);  // primary text
+}
+
+// ---------------------------------------------------------------------------
+// ProgressBarDelegate — paints a rounded accent-filled progress bar (with "%"
+// text) in the 进度 column, reflecting the row's ProgressRole value. We draw it
+// by hand (rounded track + accent gradient chunk) rather than via the platform
+// style so it honors the theme accent regardless of QSS reach.
 // Percent < 0 / unset -> paint nothing but the default cell background.
 // ---------------------------------------------------------------------------
 namespace {
@@ -100,16 +127,42 @@ public:
         if (!ok || pct < 0)
             return;   // not started: leave the (already-painted) empty cell
 
-        QStyleOptionProgressBar bar;
-        bar.rect      = option.rect.adjusted(3, 4, -3, -4);
-        bar.minimum   = 0;
-        bar.maximum   = 100;
-        bar.progress  = std::clamp(pct, 0, 100);
-        bar.text      = QString::number(bar.progress) + QStringLiteral("%");
-        bar.textVisible   = true;
-        bar.textAlignment = Qt::AlignCenter;
-        bar.state     = QStyle::State_Enabled;
-        QApplication::style()->drawControl(QStyle::CE_ProgressBar, &bar, painter);
+        const int clamped = std::clamp(pct, 0, 100);
+        const QRectF track = QRectF(option.rect).adjusted(4, 5, -4, -5);
+        const qreal radius = track.height() / 2.0;
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, true);
+
+        // Track (subtle, rounded).
+        QPainterPath trackPath;
+        trackPath.addRoundedRect(track, radius, radius);
+        painter->fillPath(trackPath, theme::kTrack);
+        painter->setPen(QPen(theme::kBorder, 1.0));
+        painter->drawPath(trackPath);
+
+        // Accent chunk (vertical gradient for a little depth).
+        if (clamped > 0) {
+            QRectF fill = track;
+            fill.setWidth(track.width() * clamped / 100.0);
+            if (fill.width() < radius * 2.0)  // keep the rounded cap visible at low %
+                fill.setWidth(std::min(track.width(), radius * 2.0));
+            QPainterPath fillPath;
+            fillPath.addRoundedRect(fill, radius, radius);
+            QLinearGradient g(fill.topLeft(), fill.bottomLeft());
+            g.setColorAt(0.0, theme::kAccentHi);
+            g.setColorAt(1.0, theme::kAccent);
+            painter->fillPath(fillPath, g);
+        }
+
+        // Centered "%" text.
+        painter->setPen(theme::kText);
+        QFont f = option.font;
+        f.setPointSizeF(f.pointSizeF() > 0 ? f.pointSizeF() : 8.5);
+        painter->setFont(f);
+        painter->drawText(option.rect, Qt::AlignCenter,
+                          QString::number(clamped) + QStringLiteral("%"));
+        painter->restore();
     }
 };
 } // namespace
@@ -167,12 +220,332 @@ public:
 }
 
 // ---------------------------------------------------------------------------
+// E: pure helper — resolve the folder a row's outputs were (likely) written to.
+// Mirrors EngineWorker::run's desired_dir:
+//     chosenDir.isEmpty() ? parent_dir(path) : chosenDir
+// We do NOT model the not-writable -> Documents/suji-转写 fallback here (rare;
+// only fires on read-only source dirs); this returns the LIKELY dir for the
+// "打开输出文件夹" action. Returns the path's own directory when chosenDir is
+// empty, or the chosen dir otherwise.
+// ---------------------------------------------------------------------------
+/*static*/ QString MainWindow::rowOutputDir(const QString& path, const QString& chosenDir)
+{
+    if (!chosenDir.isEmpty())
+        return chosenDir;
+    return QFileInfo(path).absolutePath();
+}
+
+// ---------------------------------------------------------------------------
+// D: programmatic app icon — a rounded-rect tile in the theme accent with a
+// minimal white "S" waveform mark, so the app has an intentional icon without
+// shipping an external asset (a polished asset is NEEDS-HUMAN).
+// ---------------------------------------------------------------------------
+/*static*/ QIcon MainWindow::makeAppIcon()
+{
+    QPixmap pm(64, 64);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    // Rounded tile background (deep panel -> base, subtle vertical gradient).
+    QLinearGradient bg(0, 0, 0, 64);
+    bg.setColorAt(0.0, QColor(0x22, 0x25, 0x2e));
+    bg.setColorAt(1.0, QColor(0x16, 0x18, 0x1d));
+    QPainterPath tile;
+    tile.addRoundedRect(QRectF(2, 2, 60, 60), 14, 14);
+    p.fillPath(tile, bg);
+    p.setPen(QPen(theme::kBorder, 1.5));
+    p.drawPath(tile);
+
+    // A small centered "waveform": a few vertical accent bars of varying height,
+    // evoking audio -> subtitle (the subject's own world).
+    p.setPen(Qt::NoPen);
+    p.setBrush(theme::kAccent);
+    const int heights[5] = {16, 30, 40, 26, 18};
+    int x = 16;
+    for (int h : heights) {
+        QRectF bar(x, 32 - h / 2.0, 5, h);
+        QPainterPath bp; bp.addRoundedRect(bar, 2.5, 2.5);
+        p.fillPath(bp, theme::kAccent);
+        x += 8;
+    }
+    p.end();
+    return QIcon(pm);
+}
+
+// ---------------------------------------------------------------------------
+// D: app-wide dark QSS theme. One calm teal-blue accent (#4c9aff) over a deep,
+// even background family; rounded controls; a styled gridless table with alt
+// rows + accent selection; a primary (accent) Start button vs a quiet Cancel;
+// slim dark scrollbars. Kept as a static so main.cpp applies it via
+// qApp->setStyleSheet() and a test can assert it is non-empty.
+//
+// Palette (cohesive, from the mission baseline):
+//   window/base   #16181d   panels/inputs #22252e   alt row #1c1f27
+//   header/track  #2a2e3a   border        #333845
+//   text primary  #e7e9ee   secondary     #9aa3b2
+//   accent        #4c9aff   hover #63a9ff  pressed #3b86e6
+//   success       #3ddc97   error  #ff6b6b
+// ---------------------------------------------------------------------------
+/*static*/ QString MainWindow::themeStyleSheet()
+{
+    return QStringLiteral(R"(
+/* ── Base / window ──────────────────────────────────────────────── */
+QWidget {
+    background-color: #16181d;
+    color: #e7e9ee;
+    font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    font-size: 9pt;
+}
+QMainWindow { background-color: #16181d; }
+
+/* ── Tool bar ────────────────────────────────────────────────────── */
+QToolBar {
+    background-color: #16181d;
+    border: none;
+    border-bottom: 1px solid #333845;
+    padding: 6px 8px;
+    spacing: 6px;
+}
+QToolBar::separator {
+    background: #333845;
+    width: 1px;
+    margin: 4px 8px;
+}
+
+/* ── Buttons (toolbar + log controls = secondary) ───────────────── */
+QPushButton {
+    background-color: #2a2e3a;
+    color: #e7e9ee;
+    border: 1px solid #333845;
+    border-radius: 6px;
+    padding: 6px 14px;
+    min-width: 56px;
+}
+QPushButton:hover   { background-color: #333845; border-color: #44495a; }
+QPushButton:pressed { background-color: #22252e; }
+QPushButton:disabled { color: #5a6072; background-color: #1c1f27; border-color: #2a2e3a; }
+
+/* ── Labels (secondary copy) ─────────────────────────────────────── */
+QLabel { background: transparent; color: #9aa3b2; }
+QLabel#emptyHint {
+    color: #5a6072;
+    font-size: 11pt;
+    background: transparent;
+}
+
+/* ── Table ───────────────────────────────────────────────────────── */
+QTableView {
+    background-color: #16181d;
+    alternate-background-color: #1c1f27;
+    gridline-color: #22252e;
+    selection-background-color: #25364f;
+    selection-color: #ffffff;
+    border: 1px solid #333845;
+    border-radius: 8px;
+    outline: none;
+    padding: 2px;
+}
+/* E: accent drop-zone border while a drag with files hovers the window. */
+QTableView[dragActive="true"] {
+    border: 2px solid #4c9aff;
+    background-color: #1a2330;
+}
+QTableView::item {
+    padding: 4px 8px;
+    border: none;
+}
+QTableView::item:selected { background-color: #25364f; color: #ffffff; }
+QHeaderView::section {
+    background-color: #2a2e3a;
+    color: #aab2c2;
+    font-weight: 600;
+    padding: 7px 8px;
+    border: none;
+    border-right: 1px solid #333845;
+    border-bottom: 1px solid #333845;
+}
+QHeaderView::section:last { border-right: none; }
+QTableCornerButton::section { background-color: #2a2e3a; border: none; }
+
+/* ── Splitter ────────────────────────────────────────────────────── */
+QSplitter::handle { background-color: #16181d; height: 6px; }
+QSplitter::handle:hover { background-color: #4c9aff; }
+
+/* ── Log panel ───────────────────────────────────────────────────── */
+QTextEdit {
+    background-color: #121419;
+    color: #9aa3b2;
+    border: 1px solid #333845;
+    border-radius: 8px;
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-size: 8.5pt;
+    selection-background-color: #25364f;
+    padding: 4px;
+}
+
+/* ── Bottom panel background ─────────────────────────────────────── */
+QWidget#bottomWidget {
+    background-color: #1a1c22;
+    border-top: 1px solid #333845;
+    border-radius: 8px;
+}
+
+/* ── Combo box ───────────────────────────────────────────────────── */
+QComboBox {
+    background-color: #22252e;
+    color: #e7e9ee;
+    border: 1px solid #333845;
+    border-radius: 6px;
+    padding: 5px 10px;
+    min-width: 76px;
+}
+QComboBox:hover  { border-color: #44495a; }
+QComboBox:focus  { border-color: #4c9aff; }
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox::down-arrow {
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #9aa3b2;
+    margin-right: 6px;
+}
+QComboBox QAbstractItemView {
+    background-color: #22252e;
+    color: #e7e9ee;
+    selection-background-color: #25364f;
+    border: 1px solid #4c9aff;
+    border-radius: 6px;
+    outline: none;
+    padding: 2px;
+}
+
+/* ── Spin boxes ──────────────────────────────────────────────────── */
+QSpinBox {
+    background-color: #22252e;
+    color: #e7e9ee;
+    border: 1px solid #333845;
+    border-radius: 6px;
+    padding: 5px 8px;
+    min-width: 58px;
+}
+QSpinBox:hover { border-color: #44495a; }
+QSpinBox:focus { border-color: #4c9aff; }
+QSpinBox::up-button, QSpinBox::down-button {
+    background-color: #2a2e3a;
+    border: none;
+    width: 16px;
+}
+QSpinBox::up-button   { border-top-right-radius: 6px; }
+QSpinBox::down-button { border-bottom-right-radius: 6px; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover { background-color: #4c9aff; }
+
+/* ── Check boxes ─────────────────────────────────────────────────── */
+QCheckBox { color: #e7e9ee; spacing: 6px; background: transparent; }
+QCheckBox::indicator {
+    width: 15px; height: 15px;
+    border: 1px solid #333845;
+    border-radius: 4px;
+    background-color: #22252e;
+}
+QCheckBox::indicator:checked { background-color: #4c9aff; border-color: #4c9aff; image: none; }
+QCheckBox::indicator:hover   { border-color: #4c9aff; }
+
+/* ── Global progress bar (bottom) ────────────────────────────────── */
+QProgressBar {
+    background-color: #2a2e3a;
+    border: 1px solid #333845;
+    border-radius: 9px;
+    height: 18px;
+    text-align: center;
+    color: #e7e9ee;
+    font-size: 8pt;
+}
+QProgressBar::chunk {
+    background-color: #4c9aff;
+    border-radius: 8px;
+}
+
+/* ── Primary action button (Start / 开始) ────────────────────────── */
+QPushButton#btnStart {
+    background-color: #4c9aff;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    padding: 7px 26px;
+    font-weight: 700;
+    min-width: 90px;
+}
+QPushButton#btnStart:hover   { background-color: #63a9ff; }
+QPushButton#btnStart:pressed { background-color: #3b86e6; }
+QPushButton#btnStart:disabled {
+    background-color: #22252e; color: #5a6072; border: 1px solid #333845;
+}
+
+/* ── Secondary action button (Cancel / 取消) ─────────────────────── */
+QPushButton#btnCancel {
+    background-color: transparent;
+    color: #9aa3b2;
+    border: 1px solid #333845;
+    border-radius: 6px;
+    padding: 7px 26px;
+    min-width: 90px;
+}
+QPushButton#btnCancel:hover {
+    background-color: #2a2e3a; color: #e7e9ee; border-color: #44495a;
+}
+QPushButton#btnCancel:pressed  { background-color: #22252e; }
+QPushButton#btnCancel:disabled { color: #44495a; border-color: #2a2e3a; }
+
+/* ── Scroll bars (slim, dark) ────────────────────────────────────── */
+QScrollBar:vertical {
+    background: transparent; width: 9px; margin: 0; border-radius: 4px;
+}
+QScrollBar::handle:vertical {
+    background: #333845; border-radius: 4px; min-height: 24px;
+}
+QScrollBar::handle:vertical:hover { background: #4c9aff; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal {
+    background: transparent; height: 9px; border-radius: 4px;
+}
+QScrollBar::handle:horizontal {
+    background: #333845; border-radius: 4px; min-width: 24px;
+}
+QScrollBar::handle:horizontal:hover { background: #4c9aff; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+/* ── Tool tips ───────────────────────────────────────────────────── */
+QToolTip {
+    background-color: #22252e;
+    color: #e7e9ee;
+    border: 1px solid #4c9aff;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+
+/* ── Context menu ────────────────────────────────────────────────── */
+QMenu {
+    background-color: #22252e;
+    color: #e7e9ee;
+    border: 1px solid #333845;
+    border-radius: 8px;
+    padding: 4px;
+}
+QMenu::item { padding: 6px 22px; border-radius: 5px; }
+QMenu::item:selected { background-color: #25364f; color: #ffffff; }
+QMenu::separator { height: 1px; background: #333845; margin: 4px 8px; }
+)");
+}
+
+// ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     setWindowTitle(tr("suji 批量转写"));
+    setWindowIcon(makeAppIcon());   // D: intentional programmatic icon (no external asset)
     resize(1000, 660);
     setAcceptDrops(true);
 
@@ -198,6 +571,12 @@ MainWindow::MainWindow(QWidget* parent)
     auto* btnOutDir = new QPushButton(tr("输出目录…"), toolBar);
     m_outDirLabel = new QLabel(tr("（与源文件相同）"), toolBar);
     m_outDirLabel->setMinimumWidth(200);
+
+    // E: tooltips (短说明 + shortcut hint where relevant)
+    btnAddFiles->setToolTip(tr("选择一个或多个媒体文件加入列表 (Ctrl+O)"));
+    btnAddFolder->setToolTip(tr("递归添加文件夹内的所有媒体文件"));
+    btnClear->setToolTip(tr("清空文件列表"));
+    btnOutDir->setToolTip(tr("选择输出目录（留空则写到每个源文件旁）"));
 
     toolBar->addWidget(btnAddFiles);
     toolBar->addWidget(btnAddFolder);
@@ -234,7 +613,23 @@ MainWindow::MainWindow(QWidget* parent)
     m_table->setColumnWidth(ColSegs,     60);
     m_table->setColumnWidth(ColErr,      200);
     m_table->verticalHeader()->setVisible(false);
-    m_table->verticalHeader()->setDefaultSectionSize(27);  // taller rows for readability
+    m_table->verticalHeader()->setDefaultSectionSize(30);  // taller rows for readability
+
+    // E: row context menu (移除 / 打开输出文件夹 / 打开转写结果) + double-click → open output.
+    m_table->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_table, &QTableView::customContextMenuRequested,
+            this,    &MainWindow::onTableContextMenu);
+    connect(m_table, &QTableView::doubleClicked,
+            this,    &MainWindow::onTableDoubleClicked);
+
+    // D: empty-state overlay — a centered muted hint over the table when 0 rows.
+    // Parented to the viewport so it floats above the (empty) cells; repositioned
+    // in resizeEvent and shown/hidden by updateEmptyState().
+    m_emptyHint = new QLabel(tr("拖入视频/音频，或点「添加文件」开始"), m_table->viewport());
+    m_emptyHint->setObjectName(QStringLiteral("emptyHint"));
+    m_emptyHint->setAlignment(Qt::AlignCenter);
+    m_emptyHint->setAttribute(Qt::WA_TransparentForMouseEvents);  // clicks fall through to the table
+    m_emptyHint->setWordWrap(true);
 
     // -----------------------------------------------------------------------
     // Log panel — splitter below the file table
@@ -352,8 +747,12 @@ MainWindow::MainWindow(QWidget* parent)
     progressRow->addWidget(m_progress, /*stretch=*/1);
     progressRow->addWidget(m_statusLabel);
 
-    // Action row: Start / Cancel
+    // Action row: [完成后打开输出] ... Start / Cancel
     auto* actionRow = new QHBoxLayout;
+    // E (optional): open the first output folder when the batch finishes.
+    m_chkOpenOnFinish = new QCheckBox(tr("完成后打开输出文件夹"), bottomWidget);
+    m_chkOpenOnFinish->setToolTip(tr("批量完成后自动在文件管理器中打开输出目录"));
+    actionRow->addWidget(m_chkOpenOnFinish);
     actionRow->addStretch();
     m_btnStart  = new QPushButton(tr("开始"), bottomWidget);
     m_btnCancel = new QPushButton(tr("取消"), bottomWidget);
@@ -362,6 +761,8 @@ MainWindow::MainWindow(QWidget* parent)
     m_btnCancel->setEnabled(false);
     m_btnStart->setMinimumWidth(80);
     m_btnCancel->setMinimumWidth(80);
+    m_btnStart->setToolTip(tr("开始转写列表中的所有文件 (Ctrl+Enter)"));
+    m_btnCancel->setToolTip(tr("取消正在进行的转写 (Esc)"));
     actionRow->addWidget(m_btnStart);
     actionRow->addWidget(m_btnCancel);
 
@@ -414,6 +815,29 @@ MainWindow::MainWindow(QWidget* parent)
 
     // G11: restore persisted settings AFTER all widgets are constructed
     loadSettings();
+
+    // E: keyboard shortcuts. WindowShortcut context so they don't hijack typing in
+    // the log/spinboxes — Qt routes a shortcut to the focused widget's own handlers
+    // first, and the action callbacks themselves no-op when not applicable.
+    auto* scAdd = new QShortcut(QKeySequence(QKeySequence::Open), this);  // Ctrl+O
+    connect(scAdd, &QShortcut::activated, this, &MainWindow::onAddFiles);
+
+    auto* scCancel = new QShortcut(QKeySequence(Qt::Key_Escape), this);   // Esc
+    connect(scCancel, &QShortcut::activated, this, [this]() {
+        if (m_btnCancel && m_btnCancel->isEnabled()) onCancel();
+    });
+
+    // Ctrl+Enter / Ctrl+Return → 开始 (only when idle). A bare Space/Enter would
+    // hijack typing/spinbox editing, so we require the Ctrl modifier.
+    auto* scStart1 = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
+    auto* scStart2 = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Enter),  this);
+    auto startIfIdle = [this]() { if (m_btnStart && m_btnStart->isEnabled()) onStart(); };
+    connect(scStart1, &QShortcut::activated, this, startIfIdle);
+    connect(scStart2, &QShortcut::activated, this, startIfIdle);
+
+    // D/E: initial empty-state + Start-enabled reflect the (possibly empty) list.
+    updateEmptyState();
+    m_btnStart->setEnabled(m_model->rowCount() > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -451,6 +875,8 @@ void MainWindow::onAddFolder()
 void MainWindow::onClearList()
 {
     m_model->removeRows(0, m_model->rowCount());
+    updateEmptyState();
+    if (m_btnStart) m_btnStart->setEnabled(false);  // empty list -> nothing to start
 }
 
 void MainWindow::onChooseOutputDir()
@@ -478,6 +904,11 @@ void MainWindow::onStart()
     const QString outDir = m_outputDir;
     if (!outDir.isEmpty())
         QDir().mkpath(outDir);
+
+    // E: capture the chosen output dir for THIS run so row context-menu / double-click
+    // resolves the same dir the worker used, even if the field is edited later.
+    m_runOutputDir   = outDir;
+    m_firstOutputDir.clear();   // reset; set from the first completed file (E open-on-finish)
 
     // Reset UI state
     m_btnStart->setEnabled(false);
@@ -773,6 +1204,9 @@ void MainWindow::onWorkerFileResult(QString path, bool ok, int segments, QString
                 setRowProgress(r, 100);   // completed file: fill its per-file bar
                 appendLogLine(QStringLiteral("OK"),
                     tr("完成: %1 (%2 段)").arg(QFileInfo(path).fileName()).arg(segments));
+                // E: remember the first completed file's output dir for 完成后打开输出.
+                if (m_firstOutputDir.isEmpty())
+                    m_firstOutputDir = rowOutputDir(path, m_runOutputDir);
             } else if (err == QStringLiteral("cancelled")) {
                 setRowStatus(r, tr("取消"));
                 appendLogLine(QStringLiteral("INFO"),
@@ -808,21 +1242,36 @@ void MainWindow::onWorkerFinished(int ok, int failed, int cancelled, double wall
             .arg(cancelled)
             .arg(elapsed, 0, 'f', 1)
     );
+
+    // E (optional): open the first output folder when the batch finishes, if the
+    // user opted in and at least one file produced output this run.
+    if (m_chkOpenOnFinish && m_chkOpenOnFinish->isChecked() && !m_firstOutputDir.isEmpty()) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(m_firstOutputDir));
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Drag-and-drop
+// Drag-and-drop (E: accent drop-zone highlight while a file drag hovers)
 // ---------------------------------------------------------------------------
 void MainWindow::dragEnterEvent(QDragEnterEvent* event)
 {
-    if (event->mimeData()->hasUrls())
+    if (event->mimeData()->hasUrls()) {
+        setDragHighlight(true);   // accent border on the table while dragging files in
         event->acceptProposedAction();
-    else
+    } else {
         QMainWindow::dragEnterEvent(event);
+    }
+}
+
+void MainWindow::dragLeaveEvent(QDragLeaveEvent* event)
+{
+    setDragHighlight(false);   // clear the highlight when the drag leaves the window
+    QMainWindow::dragLeaveEvent(event);
 }
 
 void MainWindow::dropEvent(QDropEvent* event)
 {
+    setDragHighlight(false);   // clear the highlight; the files are now being added
     const QList<QUrl> urls = event->mimeData()->urls();
     for (const QUrl& url : urls) {
         if (!url.isLocalFile())
@@ -851,6 +1300,68 @@ void MainWindow::closeEvent(QCloseEvent* event)
 }
 
 // ---------------------------------------------------------------------------
+// D: keep the empty-state hint centered over the table viewport on resize.
+// ---------------------------------------------------------------------------
+void MainWindow::resizeEvent(QResizeEvent* event)
+{
+    QMainWindow::resizeEvent(event);
+    updateEmptyState();   // re-centers m_emptyHint over the current viewport
+}
+
+// ---------------------------------------------------------------------------
+// E: row context menu — 移除 / 打开输出文件夹 / 打开转写结果.
+// The last two are enabled only for a 完成 row (its outputs exist on disk).
+// ---------------------------------------------------------------------------
+void MainWindow::onTableContextMenu(const QPoint& pos)
+{
+    const QModelIndex idx = m_table->indexAt(pos);
+    if (!idx.isValid())
+        return;
+    const int row = idx.row();
+
+    const QString status = m_model->item(row, ColStatus)
+                         ? m_model->item(row, ColStatus)->text() : QString();
+    const bool done = (status == tr("完成"));
+
+    QMenu menu(this);
+    QAction* actRemove   = menu.addAction(tr("移除"));
+    menu.addSeparator();
+    QAction* actOpenDir  = menu.addAction(tr("打开输出文件夹"));
+    QAction* actOpenFile = menu.addAction(tr("打开转写结果"));
+    // Output-related actions only make sense once the file is done.
+    actOpenDir->setEnabled(done);
+    actOpenFile->setEnabled(done);
+
+    QAction* chosen = menu.exec(m_table->viewport()->mapToGlobal(pos));
+    if (!chosen)
+        return;
+    if (chosen == actRemove) {
+        m_model->removeRow(row);
+        updateEmptyState();
+        if (m_model->rowCount() == 0 && m_btnStart && m_btnCancel
+            && !m_btnCancel->isEnabled())
+            m_btnStart->setEnabled(false);
+    } else if (chosen == actOpenDir) {
+        openRowOutputFolder(row);
+    } else if (chosen == actOpenFile) {
+        openRowTranscript(row);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E: double-click a 完成 row -> open its output folder.
+// ---------------------------------------------------------------------------
+void MainWindow::onTableDoubleClicked(const QModelIndex& index)
+{
+    if (!index.isValid())
+        return;
+    const int row = index.row();
+    auto* st = m_model->item(row, ColStatus);
+    if (st && st->text() == tr("完成"))
+        openRowOutputFolder(row);
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 void MainWindow::addInputFile(const QString& path)
@@ -875,6 +1386,12 @@ void MainWindow::addInputFile(const QString& path)
     auto* itemErr    = new QStandardItem(QString());
 
     m_model->appendRow({itemFile, itemStatus, itemProg, itemSegs, itemErr});
+
+    // D/E: a non-empty list hides the hint and (when idle) enables 开始.
+    updateEmptyState();
+    if (m_btnStart && m_btnStart->isEnabled() == false && m_btnCancel
+        && !m_btnCancel->isEnabled())
+        m_btnStart->setEnabled(true);
 }
 
 void MainWindow::addFolder(const QString& dir)
@@ -886,6 +1403,93 @@ void MainWindow::addFolder(const QString& dir)
         if (isMediaFile(path))
             addInputFile(path);
     }
+}
+
+// ---------------------------------------------------------------------------
+// E: toggle the accent drop-zone border on the table. We set a dynamic property
+// the QSS targets (QTableView[dragActive="true"]) and re-polish so the style
+// re-evaluates immediately.
+// ---------------------------------------------------------------------------
+void MainWindow::setDragHighlight(bool on)
+{
+    if (!m_table) return;
+    if (m_table->property("dragActive").toBool() == on)
+        return;
+    m_table->setProperty("dragActive", on);
+    m_table->style()->unpolish(m_table);
+    m_table->style()->polish(m_table);
+    m_table->update();
+}
+
+// ---------------------------------------------------------------------------
+// D: show/hide + center the empty-state hint over the table viewport. Shown only
+// when the model has 0 rows; re-centered on every call (resize + add/remove).
+// ---------------------------------------------------------------------------
+void MainWindow::updateEmptyState()
+{
+    if (!m_emptyHint || !m_table) return;
+    const bool empty = (m_model->rowCount() == 0);
+    m_emptyHint->setVisible(empty);
+    if (!empty) return;
+    // Center over the viewport (the hint is parented to it).
+    const QRect vp = m_table->viewport()->rect();
+    const QSize hint = m_emptyHint->sizeHint();
+    const int w = std::min(hint.width()  + 24, vp.width());
+    const int h = hint.height() + 8;
+    m_emptyHint->setGeometry((vp.width()  - w) / 2,
+                             (vp.height() - h) / 2, w, h);
+}
+
+// ---------------------------------------------------------------------------
+// E: resolve a row's effective output dir. We don't get the worker's effective
+// dir back over the wire, so recompute the LIKELY dir from the stored path +
+// the run's chosen dir (rowOutputDir mirrors the worker's desired_dir logic).
+// ---------------------------------------------------------------------------
+QString MainWindow::rowEffectiveOutputDir(int row) const
+{
+    auto* itemFile = m_model->item(row, ColFile);
+    if (!itemFile) return QString();
+    const QString path = itemFile->data(Qt::UserRole).toString();
+    return rowOutputDir(path, m_runOutputDir);
+}
+
+// ---------------------------------------------------------------------------
+// E: open a row's output folder in the system file explorer.
+// ---------------------------------------------------------------------------
+void MainWindow::openRowOutputFolder(int row)
+{
+    const QString dir = rowEffectiveOutputDir(row);
+    if (dir.isEmpty() || !QDir(dir).exists()) {
+        appendLogLine(QStringLiteral("INFO"), tr("输出目录不存在: %1").arg(dir));
+        return;
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+}
+
+// ---------------------------------------------------------------------------
+// E: open a row's produced transcript. Prefers .srt, then .md, then .vtt/.json,
+// using the same stem the worker writes (the source file's basename without
+// extension). Opens it with the OS default app via QDesktopServices.
+// ---------------------------------------------------------------------------
+void MainWindow::openRowTranscript(int row)
+{
+    auto* itemFile = m_model->item(row, ColFile);
+    if (!itemFile) return;
+    const QString path = itemFile->data(Qt::UserRole).toString();
+    const QString dir  = rowEffectiveOutputDir(row);
+    const QString stem = QFileInfo(path).completeBaseName();
+
+    static const char* kExts[] = { "srt", "md", "vtt", "json" };
+    for (const char* ext : kExts) {
+        const QString cand = dir + QStringLiteral("/") + stem
+                           + QStringLiteral(".") + QString::fromLatin1(ext);
+        if (QFileInfo::exists(cand)) {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(cand));
+            return;
+        }
+    }
+    appendLogLine(QStringLiteral("INFO"),
+        tr("未找到转写结果文件: %1").arg(dir + QStringLiteral("/") + stem));
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,6 +1618,11 @@ void MainWindow::testStart(const QString& file)
 {
     addInputFile(file);
     onStart();
+}
+
+void MainWindow::testAddRow(const QString& path)
+{
+    addInputFile(path);   // populate the table without launching the worker
 }
 
 QString MainWindow::testRowStatus(int row) const

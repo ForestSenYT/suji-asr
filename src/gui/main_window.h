@@ -3,6 +3,7 @@
 #include <QProgressBar>
 #include <QStringList>
 #include <QString>
+#include <QIcon>
 #include <chrono>
 
 class QTableView;
@@ -16,6 +17,8 @@ class QSpinBox;
 class QThread;
 class QTextEdit;
 class QTimer;
+class QPoint;
+class QResizeEvent;
 
 namespace suji {
 
@@ -50,8 +53,27 @@ public:
     // Exported as static so tests can call it directly.
     static QString logLineHtml(const QString& level, const QString& msg, const QString& timestamp);
 
+    // Pure helper (E): resolve the folder a completed row's outputs were written to,
+    // given the row's source PATH and the chosen output dir (empty => next-to-source).
+    // Mirrors EngineWorker's desired_dir = chosenDir.isEmpty() ? parentDir(path) : chosenDir.
+    // Exported as static so tests can call it without a widget. Does NOT model the
+    // not-writable -> Documents fallback (the row stores its effective dir at finish);
+    // this returns the *likely* dir for the "打开输出文件夹" action.
+    static QString rowOutputDir(const QString& path, const QString& chosenDir);
+
+    // Pure helper (D): the app-wide QSS stylesheet string. Exported so a test can
+    // assert it is non-empty and main.cpp can apply it via qApp->setStyleSheet().
+    static QString themeStyleSheet();
+
+    // Pure helper (D): build the programmatic app icon (rounded-rect + waveform "S")
+    // so there is an intentional icon without an external asset.
+    static QIcon makeAppIcon();
+
     // Headless test hooks (offscreen --selftest-gui): drive the real interactive path
     void testStart(const QString& file);     // addInputFile + onStart
+    // Screenshot/demo hook: add a row WITHOUT starting the worker (so --screenshot
+    // can populate the table with representative rows + progress for a still image).
+    void testAddRow(const QString& path);
     QString testRowStatus(int row) const;     // current "状态" cell text
     QString testStatusText() const;           // bottom status label text
     QString testLogText() const;             // current log panel text (plain text extraction)
@@ -84,10 +106,16 @@ public slots:
     // moving even when engine progress callbacks are sparse. (G14)
     void onSecondTick();
 
+    // E: row interactions.
+    void onTableContextMenu(const QPoint& pos);   // 移除 / 打开输出文件夹 / 打开转写结果
+    void onTableDoubleClicked(const QModelIndex& index);  // 完成行 -> 打开输出文件夹
+
 protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragLeaveEvent(QDragLeaveEvent* event) override;  // E: clear drag highlight
     void dropEvent(QDropEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;        // D: keep empty-state overlay centered
 
 private:
     void addInputFile(const QString& path);
@@ -95,6 +123,13 @@ private:
     static bool isMediaFile(const QString& path);
     void loadSettings();   // G11: restore persisted GUI state
     void saveSettings();   // G11: persist GUI state (called in closeEvent + onStart)
+
+    // E/D interaction helpers
+    void setDragHighlight(bool on);          // toggle accent drop-zone border on the table
+    void updateEmptyState();                 // show/hide the centered "拖入…" hint over the table
+    void openRowOutputFolder(int row);       // open the row's output dir in the file explorer
+    void openRowTranscript(int row);         // open the row's produced .srt/.md if it exists
+    QString rowEffectiveOutputDir(int row) const;  // stored effective dir if known, else rowOutputDir()
 
     // Widgets
     QTableView*         m_table       = nullptr;
@@ -113,6 +148,17 @@ private:
     QPushButton*        m_btnCancel   = nullptr;
     QLabel*             m_outDirLabel = nullptr;
     QString             m_outputDir;
+
+    // E: optional "open first output folder when the batch finishes" toggle.
+    QCheckBox*          m_chkOpenOnFinish = nullptr;
+    // D: centered muted hint shown over the table when it has 0 rows.
+    QLabel*             m_emptyHint   = nullptr;
+    // E: the chosen output dir captured at the moment a run starts, so the
+    // row context menu / double-click resolves the SAME dir the worker used
+    // even if the user edits the field afterwards. Empty => next-to-source.
+    QString             m_runOutputDir;
+    // E: first effective output dir seen this run (for 完成后打开输出文件夹).
+    QString             m_firstOutputDir;
 
     // Worker thread (Task 4)
     QThread*       workerThread_ = nullptr;
