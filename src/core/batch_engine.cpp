@@ -222,6 +222,8 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   std::atomic<size_t> next_file{0};
   std::atomic<int> files_done{0};
   std::atomic<long long> samples_done{0};
+  // H9: per-consumer segment counters for split-ratio observability
+  std::atomic<long long> cpu_segs{0}, gpu_segs{0};
 
   // producers: identical to the single path.
   int nprod = std::max(1, tune.in_flight_files);
@@ -254,11 +256,12 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
     });
   }
 
-  // One reusable consumer body, parameterized by (recognizer, batch_max, sink).
+  // One reusable consumer body, parameterized by (recognizer, batch_max, sink, seg_counter).
   // Each recognizer handle is touched by exactly ONE thread.
   std::atomic<bool> cb_lock{false};                  // tiny spinlock to serialize the throttled cb
   auto consumer_last_cb = std::chrono::steady_clock::time_point{};
-  auto consume = [&](Asr& asr, int batch_max, std::vector<std::vector<Token>>& sink){
+  auto consume = [&](Asr& asr, int batch_max, std::vector<std::vector<Token>>& sink,
+                     std::atomic<long long>& seg_counter){
     SegTask first;
     while(queue.pop(first)){
       if(cancel && cancel->is_cancelled()){ queue.close(); break; }
@@ -279,6 +282,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
         samples_done += b.samples.size();
         seg_pending[b.file_id].fetch_sub(1);         // R6 fix: segment fully consumed
       }
+      seg_counter += (long long)batch.size();        // H9: count segments processed by this consumer
       if(cb && !cb_lock.exchange(true)){              // best-effort throttled live cb
         auto now = std::chrono::steady_clock::now();
         if(consumer_last_cb == std::chrono::steady_clock::time_point{} ||
@@ -294,13 +298,25 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   };
 
   std::vector<std::thread> consumers;
-  if(cok) consumers.emplace_back([&]{ consume(cpu_asr, std::max(1,tune.cpu_batch), tok_cpu); });
-  if(gok) consumers.emplace_back([&]{ consume(gpu_asr, std::max(1,tune.gpu_batch), tok_gpu); });
+  if(cok) consumers.emplace_back([&]{ consume(cpu_asr, std::max(1,tune.cpu_batch), tok_cpu, cpu_segs); });
+  if(gok) consumers.emplace_back([&]{ consume(gpu_asr, std::max(1,tune.gpu_batch), tok_gpu, gpu_segs); });
 
   // Join order: producers -> close -> both consumers.
   for(auto& p:producers) p.join();
   queue.close();
   for(auto& c:consumers) c.join();
+
+  // H9: log the CPU/GPU segment split for observability (visible in CLI stderr + GUI log).
+  {
+    long long cs = cpu_segs.load(), gs = gpu_segs.load(), tot = cs + gs;
+    if (tot > 0) {
+      int cpu_pct = (int)(cs * 100 / tot), gpu_pct = (int)(gs * 100 / tot);
+      log_info("hetero split: CPU " + std::to_string(cs) + " segs (" + std::to_string(cpu_pct)
+               + "%) / GPU " + std::to_string(gs) + " segs (" + std::to_string(gpu_pct) + "%)");
+    } else {
+      log_info("hetero split: CPU 0 segs (0%) / GPU 0 segs (0%)");
+    }
+  }
 
   // finalize per file: merge tok_cpu[i] + tok_gpu[i] -> sort -> merge -> punctuate.
   Punctuator punct(cfg);
