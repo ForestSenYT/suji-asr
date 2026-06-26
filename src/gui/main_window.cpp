@@ -27,6 +27,7 @@
 #include <QStandardItemModel>
 #include <QTableView>
 #include <QThread>
+#include <QTimer>
 #include <QToolBar>
 #include <QDirIterator>
 #include <QUrl>
@@ -258,6 +259,11 @@ MainWindow::MainWindow(QWidget* parent)
 
     workerThread_->start();
 
+    // G14: per-second status repaint timer (created stopped; started in onWorkerStarted).
+    m_tick = new QTimer(this);
+    m_tick->setInterval(1000);
+    connect(m_tick, &QTimer::timeout, this, &MainWindow::onSecondTick);
+
     // Route core log_info/log_err -> GUI log panel (thread-safe via queued connection)
     QPointer<MainWindow> self(this);
     set_log_sink([self](const std::string& lvl, const std::string& m) {
@@ -351,6 +357,18 @@ void MainWindow::onStart()
     m_startTime = std::chrono::steady_clock::now();
     m_transStartAudio = -1.0;   // reset transcription-phase anchor for this run
 
+    // G14: reset live-feedback snapshot + EMA state for this run.
+    m_jobRunning      = true;
+    m_lastFilesDone   = 0;
+    m_lastFilesTotal  = files.size();
+    m_lastAudioSec    = 0.0;
+    m_lastTotalAudio  = 0.0;
+    m_lastCpuSegs     = 0;
+    m_lastGpuSegs     = 0;
+    m_lastPct         = 0;
+    m_emaRate         = 0.0;
+    m_prevAudioSec    = -1.0;
+
     // G11: persist settings when run starts
     saveSettings();
 
@@ -372,6 +390,9 @@ void MainWindow::onStart()
 
 void MainWindow::onCancel()
 {
+    // G14: stop the per-second tick so it can't overwrite the "正在取消…" message
+    // while the worker winds down; onWorkerFinished writes the final summary.
+    if (m_tick) m_tick->stop();
     setStatusText(tr("正在取消…"));
     if (worker_) worker_->requestCancel();   // direct atomic store; thread-safe, takes effect immediately
 }
@@ -381,7 +402,11 @@ void MainWindow::onCancel()
 // ---------------------------------------------------------------------------
 void MainWindow::onWorkerStarted(QString provider, int filesTotal)
 {
-    setStatusText(tr("正在用 %1 转写 %2 个文件…")
+    m_lastFilesTotal = filesTotal;
+    // During init+decode+VAD there is no transcription % yet — say so explicitly
+    // instead of "转写" so the wording matches what's actually happening. The first
+    // onWorkerProgress (real transcription output) replaces this with the live line.
+    setStatusText(tr("正在用 %1 解码 / 准备转写 %2 个文件…")
         .arg(provider.toUpper())
         .arg(filesTotal));
 
@@ -395,20 +420,39 @@ void MainWindow::onWorkerStarted(QString provider, int filesTotal)
     // animates instead of sitting at a dead 0%. onWorkerProgress switches it
     // to a real percentage on the first transcription output.
     m_progress->setRange(0, 0);
+
+    // G14: start the per-second status repaint so elapsed/ETA never appear frozen,
+    // even during the silent decode/VAD window before the first engine callback.
+    m_jobRunning = true;
+    if (m_tick) m_tick->start();
 }
 
-void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec)
+void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec,
+                                  long long cpuSegs, long long gpuSegs)
 {
     auto now = std::chrono::steady_clock::now();
-    // First progress callback = transcription has begun; anchor here so 倍速
-    // reflects the real transcription rate, not the init/decode/VAD startup that
-    // otherwise drags the early average down (the misleading "0.8x").
+    // First progress callback = transcription has begun; anchor here so the elapsed/
+    // ETA reflect the real transcription rate, not the init/decode/VAD startup.
     if (m_transStartAudio < 0.0) { m_transStartTime = now; m_transStartAudio = audioSec; }
-    double transElapsed = std::chrono::duration<double>(now - m_transStartTime).count();
-    double overall      = std::chrono::duration<double>(now - m_startTime).count();
-    double throughput = (transElapsed > 1.0)
-        ? (audioSec - m_transStartAudio) / transElapsed     // steady-state transcription speed
-        : ((overall > 0.0) ? audioSec / overall : 0.0);     // brief fallback before the window builds
+
+    // ------------------------------------------------------------------
+    // G14: EMA 倍速. The previous anchored "(audioSec-anchor)/elapsed" window is tiny
+    // and noisy early (reads a misleading ~1.8x when the true rate is ~6x). Instead
+    // track the PREVIOUS callback's (audioSec, time), take the instantaneous rate
+    // Δaudio/Δtime, and smooth it with an EMA so the figure settles on the true
+    // rate within a few seconds.
+    if (m_prevAudioSec >= 0.0) {
+        double dt = std::chrono::duration<double>(now - m_prevRateTime).count();
+        double da = audioSec - m_prevAudioSec;
+        if (dt > 1e-3 && da >= 0.0) {
+            double inst = da / dt;                       // instantaneous transcription speed
+            constexpr double kAlpha = 0.3;               // weight on the newest sample
+            m_emaRate = (m_emaRate <= 0.0) ? inst
+                                           : kAlpha * inst + (1.0 - kAlpha) * m_emaRate;
+        }
+    }
+    m_prevAudioSec = audioSec;
+    m_prevRateTime = now;
 
     int pct = (totalAudioSec > 0.5)
               ? std::min(99, static_cast<int>(100.0 * audioSec / totalAudioSec))
@@ -418,10 +462,39 @@ void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec
         m_progress->setRange(0, 100);
     m_progress->setValue(pct);
 
-    // G12 live ETA: estimated seconds remaining based on % complete
+    // G14: store the latest snapshot so the 1s tick can recompute elapsed/ETA between
+    // callbacks without waiting for the (possibly seconds-away) next engine progress.
+    m_lastFilesDone  = filesDone;
+    m_lastFilesTotal = filesTotal;
+    m_lastAudioSec   = audioSec;
+    m_lastTotalAudio = totalAudioSec;
+    m_lastCpuSegs    = cpuSegs;
+    m_lastGpuSegs    = gpuSegs;
+    m_lastPct        = pct;
+
+    renderStatusLine();
+}
+
+// ---------------------------------------------------------------------------
+// G14: render the bottom status line from the current snapshot. Called by both
+// onWorkerProgress (fresh numbers) and onSecondTick (recomputes elapsed/ETA from
+// the held snapshot) so the line keeps moving even between sparse callbacks.
+// ---------------------------------------------------------------------------
+void MainWindow::renderStatusLine()
+{
+    auto now = std::chrono::steady_clock::now();
+    double overall = std::chrono::duration<double>(now - m_startTime).count();
+
+    // 倍速: prefer the smoothed EMA; before the second callback seeds it, fall back
+    // to the overall average so we never show a wild first value or a dead 0.
+    double speed = (m_emaRate > 0.0)
+        ? m_emaRate
+        : ((overall > 0.0) ? m_lastAudioSec / overall : 0.0);
+
+    // Live ETA from % complete, recomputed against the up-to-the-second elapsed time.
     QString etaStr;
-    if (pct > 0) {
-        double etaSec = overall * (100.0 - pct) / pct;
+    if (m_lastPct > 0) {
+        double etaSec = overall * (100.0 - m_lastPct) / m_lastPct;
         int etaMin  = static_cast<int>(etaSec) / 60;
         int etaSecs = static_cast<int>(etaSec) % 60;
         etaStr = tr("  剩余约 %1:%2")
@@ -429,15 +502,44 @@ void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec
             .arg(etaSecs, 2, 10, QChar('0'));
     }
 
-    // Percentage in the status label too — guaranteed visible regardless of bar style.
-    const QString pctStr = QString::number(pct) + QStringLiteral("%");
-    setStatusText(tr("处理中 %1  %2/%3  %4 倍速  (已转写 %5 秒)%6")
+    // Live CPU/GPU split (hetero only; both 0 => single-provider, omit). Build the
+    // literal '%' via QStringLiteral so QString::arg never mis-reads it as a marker.
+    QString splitStr;
+    const long long segTot = m_lastCpuSegs + m_lastGpuSegs;
+    if (segTot > 0) {
+        int cpuPct = static_cast<int>(m_lastCpuSegs * 100 / segTot);
+        splitStr = QStringLiteral("  CPU ") + QString::number(cpuPct) + QStringLiteral("% / GPU ")
+                 + QString::number(100 - cpuPct) + QStringLiteral("%");
+    }
+
+    int elapsedMin  = static_cast<int>(overall) / 60;
+    int elapsedSecs = static_cast<int>(overall) % 60;
+
+    const QString pctStr = QString::number(m_lastPct) + QStringLiteral("%");
+    setStatusText(tr("处理中 %1  %2/%3  %4 倍速  (已转写 %5 秒, 用时 %6:%7)%8%9")
         .arg(pctStr)
-        .arg(filesDone)
-        .arg(filesTotal)
-        .arg(throughput, 0, 'f', 1)
-        .arg(static_cast<int>(audioSec))
+        .arg(m_lastFilesDone)
+        .arg(m_lastFilesTotal)
+        .arg(speed, 0, 'f', 1)
+        .arg(static_cast<int>(m_lastAudioSec))
+        .arg(elapsedMin, 2, 10, QChar('0'))
+        .arg(elapsedSecs, 2, 10, QChar('0'))
+        .arg(splitStr)
         .arg(etaStr));
+}
+
+// ---------------------------------------------------------------------------
+// G14: 1s repaint. While a job runs, refresh the status line from the held
+// snapshot so elapsed/ETA/throughput keep ticking even when the engine hasn't
+// produced a fresh progress callback (e.g. a slow GPU batch). Before the first
+// real progress arrives, leave the "正在解码 / 准备转写…" wording untouched.
+// ---------------------------------------------------------------------------
+void MainWindow::onSecondTick()
+{
+    if (!m_jobRunning) return;
+    if (m_lastTotalAudio <= 0.0 && m_lastAudioSec <= 0.0)
+        return;   // still in decode/VAD; keep the "preparing" status as-is
+    renderStatusLine();
 }
 
 void MainWindow::onWorkerFileResult(QString path, bool ok, int segments, QString err)
@@ -468,6 +570,10 @@ void MainWindow::onWorkerFileResult(QString path, bool ok, int segments, QString
 
 void MainWindow::onWorkerFinished(int ok, int failed, int cancelled, double wallSec)
 {
+    // G14: stop the per-second tick so the final summary line isn't overwritten.
+    m_jobRunning = false;
+    if (m_tick) m_tick->stop();
+
     // Restore determinate mode before setting value
     m_progress->setRange(0, 100);
     m_progress->setValue(100);

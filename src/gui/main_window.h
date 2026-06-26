@@ -2,6 +2,7 @@
 #include <QMainWindow>
 #include <QProgressBar>
 #include <QStringList>
+#include <chrono>
 
 class QTableView;
 class QStandardItemModel;
@@ -13,6 +14,7 @@ class QPushButton;
 class QSpinBox;
 class QThread;
 class QPlainTextEdit;
+class QTimer;
 
 namespace suji {
 
@@ -60,11 +62,16 @@ public slots:
 
     // Worker signal handlers
     void onWorkerStarted(QString provider, int filesTotal);
-    void onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec);
+    void onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec,
+                          long long cpuSegs, long long gpuSegs);
     void onWorkerFileResult(QString path, bool ok, int segments, QString err);
     void onWorkerFinished(int ok, int failed, int cancelled, double wallSec);
 
     void appendLogLine(QString level, QString msg);
+
+    // Fires every 1s while a job runs so the status line (elapsed/ETA/throughput) keeps
+    // moving even when engine progress callbacks are sparse. (G14)
+    void onSecondTick();
 
 protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
@@ -100,12 +107,40 @@ private:
     QThread*       workerThread_ = nullptr;
     EngineWorker*  worker_       = nullptr;
 
+    // G14: per-second status repaint. Drives onSecondTick() while a job runs so the
+    // elapsed/ETA/throughput line keeps moving between sparse engine callbacks.
+    QTimer*        m_tick        = nullptr;
+
     // Timing for throughput display
     std::chrono::steady_clock::time_point m_startTime;
     // Transcription-phase timing: 倍速 excludes the init/decode/VAD startup so it
     // reflects the real transcription speed, not a startup-dragged average.
     std::chrono::steady_clock::time_point m_transStartTime;
     double m_transStartAudio = -1.0;   // -1 => transcription not started yet this run
+
+    // ------------------------------------------------------------------
+    // G14: live-feedback state. Latest snapshot from onWorkerProgress so the
+    // 1s tick can recompute elapsed/ETA/throughput without waiting for the
+    // next (possibly seconds-away) engine callback.
+    // ------------------------------------------------------------------
+    bool      m_jobRunning      = false;  // true between onWorkerStarted and onWorkerFinished
+    int       m_lastFilesDone   = 0;
+    int       m_lastFilesTotal  = 0;
+    double    m_lastAudioSec     = 0.0;   // VAD-speech seconds transcribed so far
+    double    m_lastTotalAudio   = 0.0;   // total speech to transcribe (for %)
+    long long m_lastCpuSegs      = 0;
+    long long m_lastGpuSegs      = 0;
+    int       m_lastPct          = 0;     // last computed % (held between ticks)
+
+    // EMA of the instantaneous transcription rate (倍速). Smooths out the noisy,
+    // misleadingly-low early window so the figure settles on the true rate fast.
+    double                                m_emaRate     = 0.0;   // 0 => unseeded
+    double                                m_prevAudioSec = -1.0; // previous callback's audioSec
+    std::chrono::steady_clock::time_point m_prevRateTime;        // previous callback's wall time
+
+    // Re-render the bottom status line from the current snapshot (called by both
+    // onWorkerProgress and the 1s tick so the two never disagree).
+    void renderStatusLine();
 };
 
 } // namespace suji
