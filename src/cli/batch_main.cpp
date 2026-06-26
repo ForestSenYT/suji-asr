@@ -49,13 +49,12 @@ int main(int argc, char** argv) {
   }
 
   EngineConfig c;
-  std::string mdl = models_dir();
-  std::string m = mdl + "/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/";
-  c.ffmpeg_path = ffmpeg_path();
-  c.asr_model   = m + "model.int8.onnx";
-  c.tokens      = m + "tokens.txt";
-  c.vad_model   = mdl + "/silero_vad.onnx";
-  c.punct_model = mdl + "/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.int8.onnx";
+  { auto mp = default_model_paths();
+    c.ffmpeg_path = ffmpeg_path();
+    c.asr_model   = mp.asr_model;
+    c.tokens      = mp.tokens;
+    c.vad_model   = mp.vad_model;
+    c.punct_model = mp.punct_model; }
 
   std::string out_dir        = ".";
   std::string prov           = "auto";

@@ -37,7 +37,8 @@ static std::string stem(const std::string& p) {
 } // namespace
 
 void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
-                       bool srt, bool vtt, bool json, bool md)
+                       bool srt, bool vtt, bool json, bool md,
+                       int batchOverride, int inFlightOverride)
 {
     // Re-entrancy guard: reject concurrent calls (e.g. double-click Start)
     bool expected = false;
@@ -56,13 +57,12 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     // Build EngineConfig from relocatable paths (app-relative, dev fallback)
     // ------------------------------------------------------------------
     EngineConfig c;
-    std::string mdl = models_dir();
-    std::string m   = mdl + "/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/";
-    c.ffmpeg_path = ffmpeg_path();
-    c.asr_model   = m   + "model.int8.onnx";
-    c.tokens      = m   + "tokens.txt";
-    c.vad_model   = mdl + "/silero_vad.onnx";
-    c.punct_model = mdl + "/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.int8.onnx";
+    { auto mp = default_model_paths();
+      c.ffmpeg_path = ffmpeg_path();
+      c.asr_model   = mp.asr_model;
+      c.tokens      = mp.tokens;
+      c.vad_model   = mp.vad_model;
+      c.punct_model = mp.punct_model; }
 
     c.out_srt  = srt;
     c.out_vtt  = vtt;
@@ -105,6 +105,14 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
         tune.num_threads = std::max(4, hw.cpu_threads);
         tune.batch       = std::min(4, std::max(1, hw.cpu_threads / 4));
     }
+
+    // G12: apply GUI batch/in-flight overrides (0 = auto, leave decide() value as-is)
+    if (batchOverride > 0) {
+        tune.batch     = batchOverride;
+        tune.gpu_batch = batchOverride;
+    }
+    if (inFlightOverride > 0)
+        tune.in_flight_files = inFlightOverride;
 
     log_info(std::string("GUI engine: provider=") + provider_str(tune.provider));
 

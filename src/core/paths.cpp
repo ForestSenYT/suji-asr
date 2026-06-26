@@ -74,4 +74,15 @@ std::string cuda_dll_dir() {
     return "";
 }
 
+ModelPaths default_model_paths() {
+    std::string mdl = models_dir();
+    std::string m   = mdl + "/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/";
+    ModelPaths p;
+    p.asr_model   = m   + "model.int8.onnx";
+    p.tokens      = m   + "tokens.txt";
+    p.vad_model   = mdl + "/silero_vad.onnx";
+    p.punct_model = mdl + "/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.int8.onnx";
+    return p;
+}
+
 } // namespace suji
