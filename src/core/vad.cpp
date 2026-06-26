@@ -15,37 +15,47 @@ Vad::Vad(const EngineConfig& cfg) {
   vad_ = SherpaOnnxCreateVoiceActivityDetector(&c, 60.0f);
 }
 Vad::~Vad(){ if (vad_) SherpaOnnxDestroyVoiceActivityDetector(vad_); }
-std::vector<SpeechSeg> Vad::segment(const AudioBuffer& audio, const CancelToken* cancel) {
-  std::vector<SpeechSeg> out;
-  if (!vad_) return out;
+void Vad::segment_stream(const AudioBuffer& audio,
+                         const std::function<bool(SpeechSeg&&)>& on_seg,
+                         const CancelToken* cancel) {
+  if (!vad_) return;
   // T11: a single Vad is reused across many files (one per producer thread). Reset the
   // detector at the start of every call so each file is segmented as a fresh stream —
   // clears the Silero LSTM hidden state AND any queued segments from a prior file, so
-  // every segment() call is fully self-contained regardless of what came before.
+  // every call is fully self-contained regardless of what came before.
   SherpaOnnxVoiceActivityDetectorReset(vad_);
   const float* p = audio.samples.data();
   int64_t total = (int64_t)audio.samples.size();
   int64_t window_count = 0;
-  for (int64_t i = 0; i + window_ <= total; i += window_, ++window_count) {
-    // Check cancel every 64 windows (~32k samples ≈ 2 s of audio); cheap, prompt abort.
-    if (cancel && (window_count % 64 == 0) && cancel->is_cancelled()) break;
-    SherpaOnnxVoiceActivityDetectorAcceptWaveform(vad_, p + i, window_);
+  // Drain all currently-ready segments to on_seg; return false if a callback asked to
+  // stop (cancel/backpressure) so the caller can break out of the window loop promptly.
+  auto drain = [&]() -> bool {
     while (!SherpaOnnxVoiceActivityDetectorEmpty(vad_)) {
       const SherpaOnnxSpeechSegment* s = SherpaOnnxVoiceActivityDetectorFront(vad_);
       SpeechSeg seg; seg.start_sample = s->start; seg.samples.assign(s->samples, s->samples + s->n);
-      out.push_back(std::move(seg));
       SherpaOnnxDestroySpeechSegment(s);
       SherpaOnnxVoiceActivityDetectorPop(vad_);
+      // Emit AFTER popping so the detector's internal queue is already advanced; if the
+      // callback stops us, no segment is dropped or double-emitted.
+      if (!on_seg(std::move(seg))) return false;
     }
+    return true;
+  };
+  for (int64_t i = 0; i + window_ <= total; i += window_, ++window_count) {
+    // Check cancel every 64 windows (~32k samples ≈ 2 s of audio); cheap, prompt abort.
+    if (cancel && (window_count % 64 == 0) && cancel->is_cancelled()) return;
+    SherpaOnnxVoiceActivityDetectorAcceptWaveform(vad_, p + i, window_);
+    if (!drain()) return;   // stream each ready segment immediately; stop if asked
   }
   SherpaOnnxVoiceActivityDetectorFlush(vad_);
-  while (!SherpaOnnxVoiceActivityDetectorEmpty(vad_)) {
-    const SherpaOnnxSpeechSegment* s = SherpaOnnxVoiceActivityDetectorFront(vad_);
-    SpeechSeg seg; seg.start_sample = s->start; seg.samples.assign(s->samples, s->samples + s->n);
-    out.push_back(std::move(seg));
-    SherpaOnnxDestroySpeechSegment(s);
-    SherpaOnnxVoiceActivityDetectorPop(vad_);
-  }
+  drain();                  // final tail segments after flush
+}
+
+std::vector<SpeechSeg> Vad::segment(const AudioBuffer& audio, const CancelToken* cancel) {
+  // Built ON TOP of segment_stream so there is ONE segmentation code path: collect every
+  // emitted segment into a vector. Behaviour (Reset, cancel, segment identity) is identical.
+  std::vector<SpeechSeg> out;
+  segment_stream(audio, [&](SpeechSeg&& s){ out.push_back(std::move(s)); return true; }, cancel);
   return out;
 }
 }

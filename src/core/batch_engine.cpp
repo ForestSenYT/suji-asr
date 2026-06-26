@@ -112,14 +112,23 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
         if(cancel && cancel->is_cancelled()){
           std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="cancelled"; continue;
         }
-        auto segs = vad.segment(ab, cancel);
-        log_info("切分语音: " + inputs[fi] + " (" + std::to_string(segs.size()) + " 段)");  // G14: VAD done
-        for(auto& s : segs){
+        // P2: STREAM VAD segments to the queue the instant each is emitted, so the
+        // consumers start transcribing while VAD is still running over the rest of this
+        // file (eliminates the single-file decode+VAD dead-wait). Same per-segment
+        // bookkeeping as before — only the emission becomes incremental. queue.push
+        // blocks on a full queue = natural backpressure. Returning false from the
+        // callback on cancel stops further emission promptly.
+        long long produced = 0;
+        vad.segment_stream(ab, [&](SpeechSeg&& s) -> bool {
+          if(cancel && cancel->is_cancelled()) return false;   // stop emitting on cancel
           seg_pending[fi].fetch_add(1);              // R6 fix: count before push
           segs_total.fetch_add(1);                   // segment-based progress: total grows as files are VADed
           SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples);
-          queue.push(std::move(st));
-        }
+          queue.push(std::move(st));                 // blocks if queue full (backpressure)
+          ++produced;
+          return true;
+        }, cancel);
+        log_info("切分语音: " + inputs[fi] + " (" + std::to_string(produced) + " 段)");  // G14: VAD done
         // R6: this file's production is complete only if we pushed every segment.
         { std::lock_guard<std::mutex> lk(err_mu); produced_complete[fi]=1; }
       }
@@ -281,14 +290,22 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
         if(cancel && cancel->is_cancelled()){
           std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="cancelled"; continue;
         }
-        auto segs = vad.segment(ab, cancel);
-        log_info("切分语音: " + inputs[fi] + " (" + std::to_string(segs.size()) + " 段)");  // G14: VAD done
-        for(auto& s : segs){
+        // P2: STREAM VAD segments to the shared queue as each is emitted so BOTH the
+        // CPU and GPU consumers start transcribing while VAD is still running on this
+        // file (kills the single-file decode+VAD dead-wait where both consumers idle).
+        // Per-segment bookkeeping is unchanged; only emission is incremental. push
+        // blocks on a full queue = backpressure; false from the callback stops on cancel.
+        long long produced = 0;
+        vad.segment_stream(ab, [&](SpeechSeg&& s) -> bool {
+          if(cancel && cancel->is_cancelled()) return false;   // stop emitting on cancel
           seg_pending[fi].fetch_add(1);              // R6 fix: count before push
           segs_total.fetch_add(1);                   // segment-based progress: total grows as files are VADed
           SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples);
-          queue.push(std::move(st));
-        }
+          queue.push(std::move(st));                 // blocks if queue full (backpressure)
+          ++produced;
+          return true;
+        }, cancel);
+        log_info("切分语音: " + inputs[fi] + " (" + std::to_string(produced) + " 段)");  // G14: VAD done
         { std::lock_guard<std::mutex> lk(err_mu); produced_complete[fi]=1; }
       }
     });
