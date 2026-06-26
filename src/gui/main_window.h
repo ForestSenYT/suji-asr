@@ -10,6 +10,7 @@ class QLabel;
 class QComboBox;
 class QCheckBox;
 class QPushButton;
+class QSpinBox;
 class QThread;
 class QPlainTextEdit;
 
@@ -26,11 +27,13 @@ public:
     // Getters for Task 4 wiring
     QStringList inputFiles() const;
     QString     outputDir() const;
-    QString     provider() const;   // "auto" | "cpu" | "cuda"
+    QString     provider() const;   // "auto" | "cpu" | "cuda" | "hetero"
     bool        wantSrt()  const;
     bool        wantVtt()  const;
     bool        wantJson() const;
     bool        wantMd()   const;
+    int         batchOverride()    const;  // 0 = auto
+    int         inFlightOverride() const;  // 0 = auto
 
     // Called by Task 4 to update progress / status
     void setProgress(int value);
@@ -72,6 +75,8 @@ private:
     void addInputFile(const QString& path);
     void addFolder(const QString& dir);
     static bool isMediaFile(const QString& path);
+    void loadSettings();   // G11: restore persisted GUI state
+    void saveSettings();   // G11: persist GUI state (called in closeEvent + onStart)
 
     // Widgets
     QTableView*         m_table       = nullptr;
@@ -84,6 +89,8 @@ private:
     QCheckBox*          m_chkVtt      = nullptr;
     QCheckBox*          m_chkJson     = nullptr;
     QCheckBox*          m_chkMd       = nullptr;
+    QSpinBox*           m_spnBatch    = nullptr;  // G12: batch override (0 = auto)
+    QSpinBox*           m_spnInFlight = nullptr;  // G12: in-flight override (0 = auto)
     QPushButton*        m_btnStart    = nullptr;
     QPushButton*        m_btnCancel   = nullptr;
     QLabel*             m_outDirLabel = nullptr;

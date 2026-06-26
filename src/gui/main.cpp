@@ -52,7 +52,8 @@ int main(int argc, char** argv)
                 QStringList{ selfArg2 },  // Fix 4: UTF-8 for consistency
                 QStringLiteral("build/gui_selftest"),
                 QStringLiteral("auto"),
-                true, true, true, true
+                true, true, true, true,
+                0, 0  // G12: batchOverride=auto, inFlightOverride=auto
             );
         });
 
@@ -106,7 +107,9 @@ int main(int argc, char** argv)
             Q_ARG(bool, true),
             Q_ARG(bool, false),
             Q_ARG(bool, false),
-            Q_ARG(bool, false)
+            Q_ARG(bool, false),
+            Q_ARG(int, 0),   // G12: batchOverride=auto
+            Q_ARG(int, 0)    // G12: inFlightOverride=auto
         );
 
         // After 1500ms, call requestCancel() DIRECTLY from this (main) thread —
@@ -157,7 +160,8 @@ int main(int argc, char** argv)
             Q_ARG(QStringList, QStringList{ selfArg2 }),
             Q_ARG(QString, QStringLiteral("build/st_thread")),
             Q_ARG(QString, QStringLiteral("auto")),
-            Q_ARG(bool, true), Q_ARG(bool, true), Q_ARG(bool, true), Q_ARG(bool, true));
+            Q_ARG(bool, true), Q_ARG(bool, true), Q_ARG(bool, true), Q_ARG(bool, true),
+            Q_ARG(int, 0), Q_ARG(int, 0));  // G12: batchOverride=auto, inFlightOverride=auto
         app.exec();
         workerThread.quit();
         workerThread.wait();
@@ -215,6 +219,9 @@ int main(int argc, char** argv)
     // Normal GUI path
     // ------------------------------------------------------------------
     QApplication app(argc, argv);
+    // G11: must be set before any QSettings are constructed
+    QApplication::setOrganizationName(QStringLiteral("suji"));
+    QApplication::setApplicationName(QStringLiteral("suji-asr"));
     suji::MainWindow win;
     win.show();
     return app.exec();

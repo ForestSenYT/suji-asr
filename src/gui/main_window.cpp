@@ -21,6 +21,8 @@
 #include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSettings>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QStandardItemModel>
 #include <QTableView>
@@ -174,6 +176,19 @@ MainWindow::MainWindow(QWidget* parent)
     m_chkJson->setChecked(true);
     m_chkMd->setChecked(true);
 
+    // G12: batch-size and in-flight override spinboxes (0 = auto)
+    m_spnBatch = new QSpinBox(bottomWidget);
+    m_spnBatch->setRange(0, 64);
+    m_spnBatch->setSpecialValueText(tr("自动"));
+    m_spnBatch->setValue(0);
+    m_spnBatch->setToolTip(tr("批大小 (0=自动)"));
+
+    m_spnInFlight = new QSpinBox(bottomWidget);
+    m_spnInFlight->setRange(0, 32);
+    m_spnInFlight->setSpecialValueText(tr("自动"));
+    m_spnInFlight->setValue(0);
+    m_spnInFlight->setToolTip(tr("并行文件 (0=自动)"));
+
     settingsRow->addWidget(providerLabel);
     settingsRow->addWidget(m_provider);
     settingsRow->addSpacing(16);
@@ -182,6 +197,11 @@ MainWindow::MainWindow(QWidget* parent)
     settingsRow->addWidget(m_chkVtt);
     settingsRow->addWidget(m_chkJson);
     settingsRow->addWidget(m_chkMd);
+    settingsRow->addSpacing(16);
+    settingsRow->addWidget(new QLabel(tr("批大小:"), bottomWidget));
+    settingsRow->addWidget(m_spnBatch);
+    settingsRow->addWidget(new QLabel(tr("并行文件:"), bottomWidget));
+    settingsRow->addWidget(m_spnInFlight);
     settingsRow->addStretch();
 
     // Progress row
@@ -246,6 +266,9 @@ MainWindow::MainWindow(QWidget* parent)
             Q_ARG(QString, QString::fromStdString(lvl)),
             Q_ARG(QString, QString::fromUtf8(m.c_str())));
     });
+
+    // G11: restore persisted settings AFTER all widgets are constructed
+    loadSettings();
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +351,9 @@ void MainWindow::onStart()
     m_startTime = std::chrono::steady_clock::now();
     m_transStartAudio = -1.0;   // reset transcription-phase anchor for this run
 
+    // G11: persist settings when run starts
+    saveSettings();
+
     // Invoke worker on its thread via queued connection
     QMetaObject::invokeMethod(
         worker_, "run",
@@ -338,7 +364,9 @@ void MainWindow::onStart()
         Q_ARG(bool,        wantSrt()),
         Q_ARG(bool,        wantVtt()),
         Q_ARG(bool,        wantJson()),
-        Q_ARG(bool,        wantMd())
+        Q_ARG(bool,        wantMd()),
+        Q_ARG(int,         batchOverride()),
+        Q_ARG(int,         inFlightOverride())
     );
 }
 
@@ -390,14 +418,26 @@ void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec
         m_progress->setRange(0, 100);
     m_progress->setValue(pct);
 
+    // G12 live ETA: estimated seconds remaining based on % complete
+    QString etaStr;
+    if (pct > 0) {
+        double etaSec = overall * (100.0 - pct) / pct;
+        int etaMin  = static_cast<int>(etaSec) / 60;
+        int etaSecs = static_cast<int>(etaSec) % 60;
+        etaStr = tr("  剩余约 %1:%2")
+            .arg(etaMin, 2, 10, QChar('0'))
+            .arg(etaSecs, 2, 10, QChar('0'));
+    }
+
     // Percentage in the status label too — guaranteed visible regardless of bar style.
     const QString pctStr = QString::number(pct) + QStringLiteral("%");
-    setStatusText(tr("处理中 %1  %2/%3  %4 倍速  (已转写 %5 秒)")
+    setStatusText(tr("处理中 %1  %2/%3  %4 倍速  (已转写 %5 秒)%6")
         .arg(pctStr)
         .arg(filesDone)
         .arg(filesTotal)
         .arg(throughput, 0, 'f', 1)
-        .arg(static_cast<int>(audioSec)));
+        .arg(static_cast<int>(audioSec))
+        .arg(etaStr));
 }
 
 void MainWindow::onWorkerFileResult(QString path, bool ok, int segments, QString err)
@@ -473,6 +513,9 @@ void MainWindow::dropEvent(QDropEvent* event)
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    // G11: persist settings before teardown
+    saveSettings();
+
     // Direct cancel: the atomic store reaches the blocked worker thread immediately.
     // Unbounded wait() is safe because the direct cancel makes run() return within seconds.
     if (worker_) worker_->requestCancel();
@@ -534,6 +577,50 @@ bool    MainWindow::wantSrt()  const   { return m_chkSrt->isChecked(); }
 bool    MainWindow::wantVtt()  const   { return m_chkVtt->isChecked(); }
 bool    MainWindow::wantJson() const   { return m_chkJson->isChecked(); }
 bool    MainWindow::wantMd()   const   { return m_chkMd->isChecked(); }
+int     MainWindow::batchOverride()    const { return m_spnBatch    ? m_spnBatch->value()    : 0; }
+int     MainWindow::inFlightOverride() const { return m_spnInFlight ? m_spnInFlight->value() : 0; }
+
+// ---------------------------------------------------------------------------
+// G11: QSettings persistence
+// ---------------------------------------------------------------------------
+void MainWindow::loadSettings()
+{
+    QSettings s;
+    // provider combo
+    const QString prov = s.value(QStringLiteral("gui/provider"), QStringLiteral("auto")).toString();
+    int idx = m_provider->findText(prov);
+    if (idx >= 0) m_provider->setCurrentIndex(idx);
+
+    // format checkboxes (default all on)
+    m_chkSrt ->setChecked(s.value(QStringLiteral("gui/srt"),  true).toBool());
+    m_chkVtt ->setChecked(s.value(QStringLiteral("gui/vtt"),  true).toBool());
+    m_chkJson->setChecked(s.value(QStringLiteral("gui/json"), true).toBool());
+    m_chkMd  ->setChecked(s.value(QStringLiteral("gui/md"),   true).toBool());
+
+    // output dir
+    const QString odir = s.value(QStringLiteral("gui/outputDir"), QString()).toString();
+    if (!odir.isEmpty()) {
+        m_outputDir = odir;
+        m_outDirLabel->setText(odir);
+    }
+
+    // G12 spinboxes (default 0 = auto)
+    m_spnBatch   ->setValue(s.value(QStringLiteral("gui/batchOverride"),    0).toInt());
+    m_spnInFlight->setValue(s.value(QStringLiteral("gui/inFlightOverride"), 0).toInt());
+}
+
+void MainWindow::saveSettings()
+{
+    QSettings s;
+    s.setValue(QStringLiteral("gui/provider"),          m_provider->currentText());
+    s.setValue(QStringLiteral("gui/srt"),               m_chkSrt->isChecked());
+    s.setValue(QStringLiteral("gui/vtt"),               m_chkVtt->isChecked());
+    s.setValue(QStringLiteral("gui/json"),              m_chkJson->isChecked());
+    s.setValue(QStringLiteral("gui/md"),                m_chkMd->isChecked());
+    s.setValue(QStringLiteral("gui/outputDir"),         m_outputDir);
+    s.setValue(QStringLiteral("gui/batchOverride"),     m_spnBatch->value());
+    s.setValue(QStringLiteral("gui/inFlightOverride"),  m_spnInFlight->value());
+}
 
 // ---------------------------------------------------------------------------
 // Task 4 update helpers
