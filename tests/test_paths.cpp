@@ -28,6 +28,21 @@ TEST_CASE("cuda_dll_dir returns a dir containing the CUDA runtime, or empty") {
     // empty is valid (a machine with no CUDA runtime) — nothing to assert then
 }
 
+// T4: discover_rule_fsts() — returns empty string when no FST/FAR asset present
+TEST_CASE("T4: discover_rule_fsts returns empty when no ITN asset present") {
+    // In the dev/test environment (build/Release), models_dir() falls back to
+    // SUJI_DEFAULT_MODELS_DIR which exists but has no itn.fst / itn.far.
+    // This verifies: (a) doesn't crash, (b) returns "" (ITN off by default).
+    std::string result = discover_rule_fsts();
+    // Either empty (no asset shipped) or a valid existing file path.
+    if (!result.empty()) {
+        std::error_code ec;
+        CHECK(std::filesystem::exists(result, ec));
+    }
+    // In the current repo state no ITN asset is shipped -> should be empty.
+    CHECK(result.empty());
+}
+
 // T17: default_model_paths() — centralized model path construction
 TEST_CASE("T17: default_model_paths returns non-empty strings consistent with models_dir") {
     auto mp = default_model_paths();

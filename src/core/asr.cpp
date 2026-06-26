@@ -35,6 +35,7 @@ Asr::Asr(const EngineConfig& cfg) {
   c.model_config.debug = 0;
   c.decoding_method = cfg.decoding_method.c_str();
   if (!cfg.rule_fsts.empty()) c.rule_fsts = cfg.rule_fsts.c_str();
+  if (!cfg.rule_fars.empty()) c.rule_fars = cfg.rule_fars.c_str();
   rec_ = SherpaOnnxCreateOfflineRecognizer(&c);
 }
 Asr::~Asr(){ if (rec_) SherpaOnnxDestroyOfflineRecognizer(rec_); }

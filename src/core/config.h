@@ -16,6 +16,7 @@ struct EngineConfig {
   std::string vad_model;       // silero_vad.onnx
   std::string punct_model;     // CT punct model.int8.onnx
   std::string rule_fsts;       // 可选 ITN fst(空=关)
+  std::string rule_fars;       // 可选 ITN far archive (空=关)
   Provider provider = Provider::Cpu;
   int num_threads = 4;         // CUDA 时置 1
   // VAD(默认值参考 c-api.h 示例;max_speech 取 20s 抑制超长段)

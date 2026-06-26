@@ -85,4 +85,24 @@ ModelPaths default_model_paths() {
     return p;
 }
 
+std::string discover_rule_fsts() {
+    std::string mdl = models_dir();
+    std::error_code ec;
+    // Priority-ordered well-known names.
+    for (const char* name : {"itn.fst", "itn.far"}) {
+        auto candidate = mdl + "/" + name;
+        if (std::filesystem::exists(candidate, ec)) return candidate;
+    }
+    // Fallback: first *.fst or *.far found directly in models_dir().
+    for (const char* ext : {".fst", ".far"}) {
+        for (auto& entry : std::filesystem::directory_iterator(mdl, ec)) {
+            if (ec) break;
+            if (entry.is_regular_file() && entry.path().extension() == ext)
+                return entry.path().string();
+        }
+        if (ec) ec.clear();
+    }
+    return "";
+}
+
 } // namespace suji

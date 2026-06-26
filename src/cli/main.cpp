@@ -37,7 +37,9 @@ int main(int argc, char** argv){
     c.asr_model   = mp.asr_model;
     c.tokens      = mp.tokens;
     c.vad_model   = mp.vad_model;
-    c.punct_model = mp.punct_model; }
+    c.punct_model = mp.punct_model;
+    c.rule_fsts   = discover_rule_fsts(); // auto-discover ITN FST/FAR; empty = ITN off
+  }
   std::string input=argv[1], out_dir=".";
   for (int i=2;i<argc;++i){ std::string a=argv[i];
     if (a=="-o"){

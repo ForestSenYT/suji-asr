@@ -54,7 +54,9 @@ int main(int argc, char** argv) {
     c.asr_model   = mp.asr_model;
     c.tokens      = mp.tokens;
     c.vad_model   = mp.vad_model;
-    c.punct_model = mp.punct_model; }
+    c.punct_model = mp.punct_model;
+    c.rule_fsts   = discover_rule_fsts(); // auto-discover ITN FST/FAR; empty = ITN off
+  }
 
   std::string out_dir        = ".";
   std::string prov           = "auto";

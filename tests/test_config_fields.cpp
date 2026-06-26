@@ -39,3 +39,16 @@ TEST_CASE("G10: EngineConfig punct_threads can be overridden") {
   c.punct_threads = 4;
   CHECK(c.punct_threads == 4);
 }
+
+// ---- T4: rule_fars field ----
+
+TEST_CASE("T4: EngineConfig rule_fars defaults to empty string") {
+  EngineConfig c;
+  CHECK(c.rule_fars.empty());
+}
+
+TEST_CASE("T4: EngineConfig rule_fars can be set") {
+  EngineConfig c;
+  c.rule_fars = "itn.far";
+  CHECK(c.rule_fars == "itn.far");
+}

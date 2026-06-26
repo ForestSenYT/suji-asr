@@ -34,4 +34,9 @@ struct ModelPaths {
 /// Returns non-empty strings; the files may not exist on a dev machine without models downloaded.
 ModelPaths default_model_paths();
 
+/// Auto-discover an ITN FST asset in models_dir().
+/// Looks for "itn.fst", "itn.far", or any *.fst / *.far directly under models_dir().
+/// Returns the path of the first match, or "" if none found (ITN stays OFF by default).
+std::string discover_rule_fsts();
+
 } // namespace suji
