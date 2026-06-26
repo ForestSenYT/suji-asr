@@ -18,6 +18,11 @@ Vad::~Vad(){ if (vad_) SherpaOnnxDestroyVoiceActivityDetector(vad_); }
 std::vector<SpeechSeg> Vad::segment(const AudioBuffer& audio, const CancelToken* cancel) {
   std::vector<SpeechSeg> out;
   if (!vad_) return out;
+  // T11: a single Vad is reused across many files (one per producer thread). Reset the
+  // detector at the start of every call so each file is segmented as a fresh stream —
+  // clears the Silero LSTM hidden state AND any queued segments from a prior file, so
+  // every segment() call is fully self-contained regardless of what came before.
+  SherpaOnnxVoiceActivityDetectorReset(vad_);
   const float* p = audio.samples.data();
   int64_t total = (int64_t)audio.samples.size();
   int64_t window_count = 0;
