@@ -135,3 +135,61 @@ TEST_CASE("autotune hetero R1 regression: C=16 ram=40000 exact values") {
   const int gpu_feed = 1;
   CHECK(t.in_flight_files + gpu_feed + t.cpu_asr_threads == 16); // exactly C, no oversubscription
 }
+
+// ---- H4: fill_hetero() produces the same tunables as decide()'s hetero branch ----
+
+// fill_hetero(t, hw) must agree with decide() when hardware qualifies for hetero.
+// Primary assertion: C=16, 40 GB free VRAM (gpu_free_mb=6000 -> headroom=4500 ->
+//   gpu_batch=clamp(4500/150,8,32)=30), 40 GB RAM.
+TEST_CASE("fill_hetero: synthetic C=16 40GB gpu produces correct tunables") {
+  HardwareInfo h;
+  h.cpu_threads           = 16;
+  h.has_cuda_gpu          = true;
+  h.gpu_free_mb           = 6000;   // 6000-1500=4500; 4500/150=30; clamp(30,8,32)=30
+  h.gpu_total_mb          = 8192;
+  h.cuda_runtime_available = true;
+  h.ram_free_mb           = 40000;
+
+  AutoTune t;
+  fill_hetero(t, h);
+
+  CHECK(t.hetero == true);
+  CHECK(t.provider == Provider::Hetero);
+  // P = clamp(16/4,2,6) = 4
+  CHECK(t.in_flight_files == 4);
+  // cpu_asr = max(2, 16-4-1) = 11
+  CHECK(t.cpu_asr_threads == 11);
+  // cpu_batch = clamp(11/2,2,6) = clamp(5,2,6) = 5
+  CHECK(t.cpu_batch == 5);
+  // gpu_batch = clamp((6000-1500)/150, 8, 32) = clamp(30, 8, 32) = 30
+  CHECK(t.gpu_batch == 30);
+  // postcondition: no oversubscription
+  const int gpu_feed = 1;
+  CHECK(t.in_flight_files + gpu_feed + t.cpu_asr_threads <= 16);
+  // legacy mirrors
+  CHECK(t.num_threads == t.cpu_asr_threads);
+  CHECK(t.batch == t.gpu_batch);
+}
+
+// fill_hetero must produce the SAME values as decide() for the same HW.
+TEST_CASE("fill_hetero agrees with decide() on het path") {
+  HardwareInfo h;
+  h.cpu_threads            = 16;
+  h.has_cuda_gpu           = true;
+  h.gpu_free_mb            = 6000;
+  h.gpu_total_mb           = 8192;
+  h.cuda_runtime_available = true;
+  h.ram_free_mb            = 40000;
+
+  AutoTune from_decide = decide(h, EngineConfig{});
+  AutoTune from_fill;
+  fill_hetero(from_fill, h);
+
+  REQUIRE(from_decide.hetero == true);
+  CHECK(from_fill.in_flight_files  == from_decide.in_flight_files);
+  CHECK(from_fill.cpu_asr_threads  == from_decide.cpu_asr_threads);
+  CHECK(from_fill.cpu_batch        == from_decide.cpu_batch);
+  CHECK(from_fill.gpu_batch        == from_decide.gpu_batch);
+  CHECK(from_fill.num_threads      == from_decide.num_threads);
+  CHECK(from_fill.batch            == from_decide.batch);
+}
