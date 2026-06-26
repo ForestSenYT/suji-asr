@@ -1,9 +1,11 @@
-; suji-asr 安装脚本 (Inno Setup 6) — CPU-only all-in-one。
-; 构建: 先 cmake --build build --config Release + windeployqt build\Release\suji_gui.exe,
+; suji-asr 安装脚本 (Inno Setup 6) — all-in-one (含 CUDA;运行期自适应 GPU/CPU)。
+; 构建: scripts\build_installer.ps1 会 cmake --build Release + windeployqt + 把 CUDA 运行时拷入 build\Release,
 ;       然后 ISCC.exe installer\suji.iss  → 产出 build\installer\suji-asr-setup-*.exe
-; 说明: 打包 build\Release\ 的 exe+DLL+Qt运行时 + ffmpeg.exe + models\,装到目标机后
-;       exe 用 app-relative 路径(core/paths.cpp)在自身目录找 models\ 与 ffmpeg.exe。
-; 决策 D9: CPU-only(benchmark 显示 GPU 对 int8 不值)→ 不打包 CUDA redist,排除 cuda/tensorrt provider DLL。
+; 说明: 打包 build\Release\ 的 exe+DLL+Qt运行时 + CUDA 运行时 + ffmpeg.exe + models\。装到目标机后
+;       exe 用 app-relative 路径(core/paths.cpp)在自身目录找 models\、ffmpeg.exe 与 CUDA DLL,
+;       并由 core/hardware.cpp 在运行期自适应:检测到可用 NVIDIA GPU + CUDA 运行时 → 走 GPU,否则 CPU。
+; 决策 D10(修正 D9):打包 CUDA,让部署机(如 3070 Ti)能用 GPU;是否真比 CPU 快需在该机 benchmark 确认。
+;       仅排除未使用的 TensorRT provider(sherpa 用 CUDA EP,不用 TRT)。
 
 #define MyAppName "suji 中文讲课转写"
 #define MyAppVersion "0.5"
@@ -30,7 +32,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
-; ~813MB 模型为主;允许装到非系统盘
+; ~模型 819MB + CUDA 运行时 ~2.4GB + ffmpeg 108MB 为主(lzma2 压缩后约 1.5–2GB);允许装到非系统盘
 UsePreviousAppDir=yes
 
 [Languages]
@@ -44,8 +46,10 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Source: "{#SrcRel}\suji_gui.exe";   DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SrcRel}\suji_cli.exe";   DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SrcRel}\suji_batch.exe"; DestDir: "{app}"; Flags: ignoreversion
-; --- 运行期 DLL (排除 CUDA/TensorRT provider —— CPU-only) ---
-Source: "{#SrcRel}\*.dll"; DestDir: "{app}"; Flags: ignoreversion; Excludes: "onnxruntime_providers_cuda.dll,onnxruntime_providers_tensorrt.dll"
+; --- 运行期 DLL: onnxruntime(含 CUDA provider)+ sherpa + Qt + CUDA 运行时(cudnn/cublas/cudart…)。
+;     CUDA 运行时由 scripts\build_installer.ps1 预先从 vendor\cuda-redist\dll 拷入 build\Release。
+;     仅排除未使用的 TensorRT provider。 ---
+Source: "{#SrcRel}\*.dll"; DestDir: "{app}"; Flags: ignoreversion; Excludes: "onnxruntime_providers_tensorrt.dll"
 ; --- Qt 平台/样式/tls 插件 (windeployqt 产出) ---
 Source: "{#SrcRel}\platforms\*"; DestDir: "{app}\platforms"; Flags: ignoreversion recursesubdirs
 Source: "{#SrcRel}\styles\*";    DestDir: "{app}\styles";    Flags: ignoreversion recursesubdirs createallsubdirs
