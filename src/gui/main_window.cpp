@@ -26,6 +26,7 @@
 #include <QTableView>
 #include <QThread>
 #include <QToolBar>
+#include <QDirIterator>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -506,13 +507,12 @@ void MainWindow::addInputFile(const QString& path)
 
 void MainWindow::addFolder(const QString& dir)
 {
-    const QDir d(dir);
-    const QFileInfoList entries = d.entryInfoList(
-        QDir::Files | QDir::NoDotAndDotDot | QDir::Readable,
-        QDir::Name);
-    for (const QFileInfo& fi : entries) {
-        if (isMediaFile(fi.absoluteFilePath()))
-            addInputFile(fi.absoluteFilePath());
+    QDirIterator it(dir, QDir::Files | QDir::NoDotAndDotDot | QDir::Readable,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString path = it.next();
+        if (isMediaFile(path))
+            addInputFile(path);
     }
 }
 

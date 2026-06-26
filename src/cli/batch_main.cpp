@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
     } else {
       fs::path p(a);
       if (fs::is_directory(p)) {
-        for (auto& e : fs::directory_iterator(p))
+        for (auto& e : fs::recursive_directory_iterator(p))
           if (e.is_regular_file() && is_media(e.path()))
             inputs.push_back(e.path().string());
       } else {
