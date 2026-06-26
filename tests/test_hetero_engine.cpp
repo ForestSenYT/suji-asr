@@ -11,6 +11,7 @@
 
 #include "doctest/doctest.h"
 #include "core/bounded_queue.h"
+#include "core/batch_form.h"
 #include "core/segment_merge.h"
 #include "core/cancel.h"
 
@@ -66,122 +67,107 @@ TEST_CASE("hetero: two consumers drain queue with no double-processing") {
   CHECK((int)uni.size() == K);
 }
 
-// P5 — length-bucketed reorder window: a local holding buffer (cap 2x batch) that
-// sorts held tasks by length and emits the most-similar batch, flushing on EOF.
-// This mirrors the real consumer loop in batch_engine.cpp WITHOUT a model, so it
-// proves the bucketing invariants deterministically:
-//   1. No double-processing + complete coverage with the buffer + reorder in play
-//      (union == all, intersection == empty) — reordering must not drop/dup a task.
-//   2. Every emitted batch is length-contiguous (similar lengths) — the bucketing
-//      actually groups, so DecodeMultipleOfflineStreams pads less.
+// P5 gate (REAL) — drives the PRODUCTION helpers form_next_batch()/flush_held() from
+// batch_form.h (the same code both consumers in batch_engine.cpp call), so this test
+// FAILS if the bucket=(N==1) gate is removed or inverted. The helper is gated by `bucket`:
+//   bucket=false (N>1) -> FIFO arrival order, no hold/sort (pre-P5 multi-file behaviour);
+//   bucket=true  (N==1) -> length-bucketed: hold (cap 2x), sort by len, emit shortest bmax.
 namespace {
 struct LenTask { int id; int len; };
+// Drive the real consumer-loop shape for a given `bucket` over a deterministic queue,
+// returning the flat sequence of emitted ids (in emission order). This is byte-for-byte
+// the consumer loop in batch_engine.cpp: form_next_batch per pop, eager flush_held of full
+// batches, then a final clean-EOF flush_held drain.
+std::vector<int> drive_consumer(bool bucket, const std::vector<LenTask>& input, int bmax){
+  std::queue<LenTask> q; for(const auto& t : input) q.push(t);
+  auto try_pop = [&](LenTask& o){ if(q.empty()) return false; o = q.front(); q.pop(); return true; };
+  auto len_of  = [](const LenTask& t){ return t.len; };
+  std::vector<LenTask> hold;
+  std::vector<int> emitted;
+  auto emit = [&](std::vector<LenTask>&& b){ for(auto& t : b) emitted.push_back(t.id); };
+  LenTask first;
+  while(try_pop(first)){
+    auto b = form_next_batch(bucket, std::move(first), try_pop, bmax, hold, len_of);
+    if(!b.empty()) emit(std::move(b));
+    while((int)hold.size() >= bmax){ auto fb = flush_held(bmax, hold, len_of); if(fb.empty()) break; emit(std::move(fb)); }
+  }
+  for(auto fb = flush_held(bmax, hold, len_of); !fb.empty(); fb = flush_held(bmax, hold, len_of)) emit(std::move(fb));
+  return emitted;
 }
-TEST_CASE("P5: bucketed two consumers drain with no double-processing + similar-length batches") {
+}  // namespace
+
+TEST_CASE("P5 gate (real helper): bucket=false keeps FIFO arrival order") {
+  // Length-UNSORTED arrival so any sort would be observable. ids == arrival index.
+  const std::vector<LenTask> in = {{0,300},{1,50},{2,270},{3,10},{4,290},{5,40},{6,260},{7,20}};
+  const int bmax = 4;
+  // FIFO: emitted ids must equal arrival order 0..7 exactly (no reorder, no loss/dup).
+  auto fifo = drive_consumer(/*bucket=*/false, in, bmax);
+  std::vector<int> arrival = {0,1,2,3,4,5,6,7};
+  CHECK(fifo == arrival);
+
+  // GATE GUARD: the bucket path over the SAME input must REORDER (differ from arrival).
+  // If the gate were removed/inverted so the FIFO path also bucketed, these would be equal
+  // and this CHECK would fail — that is exactly the regression we are guarding against.
+  auto bk = drive_consumer(/*bucket=*/true, in, bmax);
+  CHECK(bk != arrival);
+}
+
+TEST_CASE("P5 gate (real helper): bucket=true emits the shortest bmax first (length-sorted)") {
+  const std::vector<LenTask> in = {{0,300},{1,50},{2,270},{3,10},{4,290},{5,40},{6,260},{7,20}};
+  const int bmax = 4;
+  // First emitted batch = the 4 shortest lengths (ascending): ids 3(10),7(20),5(40),1(50).
+  auto bk = drive_consumer(/*bucket=*/true, in, bmax);
+  REQUIRE(bk.size() >= (size_t)bmax);
+  std::vector<int> first_batch(bk.begin(), bk.begin()+bmax);
+  std::vector<int> expect_short_ids = {3,7,5,1};
+  CHECK(first_batch == expect_short_ids);
+  // And it must NOT equal the FIFO first batch (proves bucketing actually reordered).
+  std::vector<int> fifo_first = {0,1,2,3};
+  CHECK(first_batch != fifo_first);
+}
+
+TEST_CASE("P5 helper: both modes lose/duplicate nothing (every id emitted exactly once)") {
+  // Larger mixed-length input through BOTH modes -> set of emitted ids == full input set.
+  std::vector<LenTask> in;
   const int K = 4000;
-  BoundedQueue<LenTask> q(64);
+  for(int i=0;i<K;i++) in.push_back({i, (i*37) % 500});
+  for(bool bucket : {false, true}){
+    auto emitted = drive_consumer(bucket, in, /*bmax=*/bucket?8:5);
+    CHECK((int)emitted.size() == K);                 // no loss, no dup (count)
+    std::set<int> uni(emitted.begin(), emitted.end());
+    CHECK((int)uni.size() == K);                     // every distinct id exactly once
+  }
+}
 
-  std::mutex emu;                       // guards the shared batch-record vector
-  std::vector<std::vector<int>> batches;   // every emitted batch's lengths, both consumers
+TEST_CASE("P5 helper: bucket=true reduces padding waste vs a length-oblivious baseline") {
+  // The bucketing payoff: grouping similar lengths shrinks per-batch max -> less pad waste.
+  std::vector<LenTask> in;
+  const int K = 4000;
+  for(int i=0;i<K;i++) in.push_back({i, (i*37) % 500});
+  const int bmax = 8;
+  // Re-drive but capture per-batch lengths (re-run the helper loop here to record batches).
+  std::queue<LenTask> q; for(const auto& t : in) q.push(t);
+  auto try_pop = [&](LenTask& o){ if(q.empty()) return false; o = q.front(); q.pop(); return true; };
+  auto len_of  = [](const LenTask& t){ return t.len; };
+  std::vector<LenTask> hold;
+  std::vector<std::vector<int>> batches;
+  auto record = [&](std::vector<LenTask>&& b){ std::vector<int> ls; for(auto& t:b) ls.push_back(t.len); batches.push_back(std::move(ls)); };
+  LenTask first;
+  while(try_pop(first)){
+    auto b = form_next_batch(true, std::move(first), try_pop, bmax, hold, len_of);
+    if(!b.empty()) record(std::move(b));
+    while((int)hold.size() >= bmax){ auto fb = flush_held(bmax, hold, len_of); if(fb.empty()) break; record(std::move(fb)); }
+  }
+  for(auto fb = flush_held(bmax, hold, len_of); !fb.empty(); fb = flush_held(bmax, hold, len_of)) record(std::move(fb));
 
-  std::set<int> seen_a, seen_b;
-  // Exact shape of the real P5 consumer: hold up to 2x batch, sort by len, emit the
-  // shortest `bmax`, keep remainder; flush whatever is left once the queue is closed.
-  auto consume = [&](std::set<int>& sink, int bmax){
-    const size_t cap = (size_t)bmax * 2;
-    std::vector<LenTask> hold;
-    auto emit_one = [&](){
-      std::sort(hold.begin(), hold.end(),
-                [](const LenTask&a,const LenTask&b){ return a.len<b.len; });
-      size_t take = std::min((size_t)bmax, hold.size());
-      std::vector<int> lens;
-      for(size_t i=0;i<take;i++){ sink.insert(hold[i].id); lens.push_back(hold[i].len); }
-      hold.erase(hold.begin(), hold.begin()+take);
-      std::lock_guard<std::mutex> lk(emu); batches.push_back(std::move(lens));
-    };
-    LenTask first;
-    while(q.pop(first)){
-      hold.push_back(first);
-      LenTask more;
-      while(hold.size() < cap && q.try_pop(more)) hold.push_back(more);
-      while((int)hold.size() >= bmax) emit_one();
-    }
-    while(!hold.empty()) emit_one();   // clean EOF flush — never drop a held task
-  };
-
-  std::thread ca([&]{ consume(seen_a, 5);  });   // "cpu" consumer
-  std::thread cb([&]{ consume(seen_b, 8);  });   // "gpu" consumer
-
-  // Mixed lengths so bucketing has something to group (id carries a deterministic len).
-  for(int i=0;i<K;i++) q.push(LenTask{i, (i*37) % 500});
-  q.close();
-  ca.join(); cb.join();
-
-  // No double-processing: intersection empty, union complete.
-  std::vector<int> inter;
-  std::set_intersection(seen_a.begin(), seen_a.end(), seen_b.begin(), seen_b.end(),
-                        std::back_inserter(inter));
-  CHECK(inter.empty());
-  CHECK((int)(seen_a.size() + seen_b.size()) == K);
-  std::set<int> uni = seen_a; uni.insert(seen_b.begin(), seen_b.end());
-  CHECK((int)uni.size() == K);
-
-  // Bucketing actually grouped: across all emitted batches, the padding waste (sum of
-  // max-len minus each item's len) is strictly less than a length-oblivious baseline
-  // that pads every batch to the GLOBAL max length (499). If bucketing did nothing the
-  // two would be equal; grouping similar lengths makes the per-batch max much smaller.
   long long bucket_waste = 0, global_waste = 0, total_items = 0;
   for(const auto& bl : batches){
     int bmaxlen = 0; for(int l : bl) bmaxlen = std::max(bmaxlen, l);
     for(int l : bl){ bucket_waste += (bmaxlen - l); global_waste += (499 - l); }
     total_items += (long long)bl.size();
   }
-  CHECK(total_items == K);                 // every task emitted exactly once
-  CHECK(bucket_waste < global_waste);      // length-bucketing reduces padding waste
-}
-
-// P5 gate — the reorder window is ENABLED only for a single input file (N==1). For N>1
-// the consumer must behave EXACTLY like main: FIFO batches, no holding buffer, no sort.
-// This test mirrors BOTH loop modes (the `bucket` branch in batch_engine.cpp) against the
-// same input and asserts: N>1 preserves arrival order (no reorder); N==1 length-sorts.
-TEST_CASE("P5 gate: N>1 keeps FIFO (no reorder); N==1 buckets by length") {
-  // Inputs arrive in a deliberately length-UNSORTED order so a reorder is observable.
-  const std::vector<int> lens = {300, 50, 270, 10, 290, 40, 260, 20};
-  const int bmax = 4;
-
-  // --- N>1 path: pop one + try_pop up to bmax (FIFO), emit. No sort. ---
-  // With a single producer push order and synchronous draining this yields arrival order.
-  std::vector<int> fifo_emitted;
-  {
-    std::queue<int> q; for(int l : lens) q.push(l);
-    while(!q.empty()){
-      std::vector<int> batch; batch.push_back(q.front()); q.pop();
-      while((int)batch.size() < bmax && !q.empty()){ batch.push_back(q.front()); q.pop(); }
-      for(int l : batch) fifo_emitted.push_back(l);   // process_batch in arrival order
-    }
-  }
-  CHECK(fifo_emitted == lens);   // N>1 path NEVER reorders -> byte-for-byte main behaviour
-
-  // --- N==1 path: hold (cap 2x), sort by length, emit shortest bmax, flush. ---
-  std::vector<int> bucket_first_batch;
-  {
-    const size_t cap = (size_t)bmax * 2;
-    std::vector<int> hold;
-    std::queue<int> q; for(int l : lens) q.push(l);
-    auto emit = [&](std::vector<int>& out){
-      std::sort(hold.begin(), hold.end());
-      size_t take = std::min((size_t)bmax, hold.size());
-      for(size_t i=0;i<take;i++) out.push_back(hold[i]);
-      hold.erase(hold.begin(), hold.begin()+take);
-    };
-    // Drain all 8 into hold (cap=8), then emit the shortest 4 -> proves length grouping.
-    while(!q.empty() && hold.size() < cap){ hold.push_back(q.front()); q.pop(); }
-    emit(bucket_first_batch);
-  }
-  // The first bucketed batch must be the 4 SHORTEST lengths, sorted ascending.
-  std::vector<int> expect_short = {10, 20, 40, 50};
-  CHECK(bucket_first_batch == expect_short);
-  CHECK(bucket_first_batch != std::vector<int>(lens.begin(), lens.begin()+bmax));  // differs from FIFO
+  CHECK(total_items == K);
+  CHECK(bucket_waste < global_waste);
 }
 
 TEST_CASE("hetero: per-engine token sinks sort/merge equal single-array baseline") {
