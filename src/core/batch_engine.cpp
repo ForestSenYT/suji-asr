@@ -9,6 +9,7 @@
 #include <atomic>
 #include <mutex>
 #include <algorithm>
+#include <chrono>
 namespace suji {
 namespace {
 struct SegTask { int file_id; int64_t start_sample; std::vector<float> samples; };
@@ -54,6 +55,7 @@ std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& i
     });
   }
   // consumer: batch decode, route tokens by file_id
+  auto consumer_last_cb = std::chrono::steady_clock::time_point{};  // zero = never fired
   std::thread consumer([&]{
     SegTask first;
     while(queue.pop(first)){
@@ -72,6 +74,17 @@ std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& i
           file_tokens[batch[i].file_id].push_back(tk);
         }
         samples_done += batch[i].samples.size();
+      }
+      // live progress: throttle to ~150 ms so we don't flood the GUI
+      if(cb){
+        auto now = std::chrono::steady_clock::now();
+        if(consumer_last_cb == std::chrono::steady_clock::time_point{} ||
+           std::chrono::duration_cast<std::chrono::milliseconds>(now - consumer_last_cb).count() >= 150){
+          consumer_last_cb = now;
+          BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
+          bp.audio_seconds_done=(double)samples_done.load()/16000.0;
+          cb(bp);
+        }
       }
     }
   });
