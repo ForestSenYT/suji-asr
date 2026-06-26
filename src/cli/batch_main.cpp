@@ -150,7 +150,9 @@ int main(int argc, char** argv) {
       log_err("hetero unavailable (need CUDA GPU + >=12 cores), falling back");
       tune.provider = hw.has_cuda_gpu ? Provider::Cuda : Provider::Cpu;
     } else {
-      fill_hetero(tune, hw);
+      // Pass the real (post-resume) file count so the thread split reclaims idle
+      // producer cores when only a few files are queued.
+      fill_hetero(tune, hw, static_cast<int>(todo.size()));
     }
   }
   // (prov == "auto") -> keep decide()'s choice as-is

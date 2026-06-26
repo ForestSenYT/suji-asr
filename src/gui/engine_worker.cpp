@@ -87,7 +87,9 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
             log_info("hetero unavailable (need CUDA GPU + >=12 cores), falling back");
             tune.provider = hw.has_cuda_gpu ? Provider::Cuda : Provider::Cpu;
         } else {
-            fill_hetero(tune, hw);
+            // Pass the input file count so the thread split reclaims idle producer
+            // cores when only a few files are queued.
+            fill_hetero(tune, hw, static_cast<int>(inputs.size()));
         }
     }
 

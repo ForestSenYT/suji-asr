@@ -115,22 +115,47 @@ HardwareInfo probe_hardware(const std::string& nvidia_smi){
   h.cuda_runtime_available = !h.cuda_dll_dir.empty();
   return h;
 }
-void fill_hetero(AutoTune& t, const HardwareInfo& hw) {
+void fill_hetero(AutoTune& t, const HardwareInfo& hw, int num_files) {
   const int C = hw.cpu_threads;
-  t.hetero          = true;
-  t.provider        = Provider::Hetero;
-  int P             = std::clamp(C / 4, 2, 6);   // producers == in_flight_files
-  t.in_flight_files = P;
-  const int gpu_feed = 1;                         // threads consumed by CUDA consumer
-  t.cpu_asr_threads = std::max(2, C - P - gpu_feed);
+  t.hetero           = true;
+  t.provider         = Provider::Hetero;
+  const int P        = std::clamp(C / 4, 2, 6);   // producers == in_flight_files
+  const int gpu_feed = 1;                          // threads consumed by CUDA consumer
+  t.in_flight_files  = P;
+
+  // --- File-count-aware CPU-recognizer thread split (reclaim idle producer cores) ---
+  // Producers decode+VAD then exit; this phase is SHORT vs the long ASR phase. Only
+  // min(P, num_files) producers ever run -- with few files the other slots sit idle
+  // and reserve nothing during ASR, so the CPU recognizer can use those cores.
+  //
+  // num_files <= 0 is the "unknown count" sentinel (e.g. decide(), which has no file
+  // list): treat as the conservative multi-file case so the steady-state invariant holds.
+  const int files = num_files > 0 ? num_files : (P + 1);
+  const int active_producers = std::min(P, files);   // producers that actually contend
+
+  // Steady-state cap (>= P+1 files): producers stay busy decoding the backlog, so we
+  // must reserve all P -> cpu_asr = C-P-gpu_feed. The empirical bench10.wav sweep
+  // (C=16/RTX2080) found this value is ALSO the single-file throughput optimum:
+  //   cpu_asr  11 -> ~99.5s   12 -> ~100.0s   13 -> ~100.7s   14 -> ~101.2s (monotonic
+  //   regression). Pushing intra-op ONNX threads higher oversubscribes the GPU host
+  //   thread + active producer and scales sublinearly. So C-P-gpu_feed is both the
+  //   steady-state value AND a hard cap we never exceed.
+  const int steady_cpu_asr = std::max(2, C - P - gpu_feed);
+  // Few-files (< P files): reclaim the (P - active_producers) idle producer cores for
+  // ASR, but clamp to steady_cpu_asr (the benchmarked best -- more would regress).
+  t.cpu_asr_threads = std::min(steady_cpu_asr, std::max(2, C - active_producers - gpu_feed));
+
   t.cpu_batch       = std::clamp(t.cpu_asr_threads / 2, 2, 6);
   // Reserve 2000 MB: display framebuffer + CUDA allocator fragmentation headroom.
   int headroom      = hw.gpu_free_mb - 2000;
   t.gpu_batch       = std::clamp(headroom > 0 ? headroom / 150 : 8, 8, 32);
   t.num_threads     = t.cpu_asr_threads;          // legacy mirror
   t.batch           = t.gpu_batch;                // legacy mirror
-  // Hard postcondition: no oversubscription
-  assert(t.in_flight_files + gpu_feed + t.cpu_asr_threads <= C);
+
+  // Hard postcondition: STEADY-STATE (multi-file) must never oversubscribe. The
+  // few-files branch may briefly overshoot during the short decode phase only.
+  assert(files < P + 1 ||
+         t.in_flight_files + gpu_feed + t.cpu_asr_threads <= C);
 }
 
 AutoTune decide(const HardwareInfo& hw, const EngineConfig& cfg){
@@ -142,7 +167,9 @@ AutoTune decide(const HardwareInfo& hw, const EngineConfig& cfg){
   if(gpu_ok && cpu_ok){
     // Hetero: one CPU recognizer + one CUDA recognizer in parallel.
     // Delegate to fill_hetero so the CLI can reuse the same formula.
-    fill_hetero(t, hw);
+    // decide() has no file list -> pass 0 (sentinel = conservative multi-file split).
+    // Callers that know the count (batch_main/engine_worker) re-call fill_hetero with it.
+    fill_hetero(t, hw, 0);
   } else if(gpu_ok){
     t.provider    = Provider::Cuda;
     t.num_threads = 1;

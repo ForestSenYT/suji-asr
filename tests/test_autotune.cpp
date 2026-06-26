@@ -151,13 +151,14 @@ TEST_CASE("fill_hetero: synthetic C=16 40GB gpu produces correct tunables") {
   h.ram_free_mb           = 40000;
 
   AutoTune t;
-  fill_hetero(t, h);
+  // Multi-file count (>= P+1) -> conservative steady-state split (the legacy values).
+  fill_hetero(t, h, 8);
 
   CHECK(t.hetero == true);
   CHECK(t.provider == Provider::Hetero);
   // P = clamp(16/4,2,6) = 4
   CHECK(t.in_flight_files == 4);
-  // cpu_asr = max(2, 16-4-1) = 11
+  // cpu_asr = max(2, 16-4-1) = 11 (steady-state cap)
   CHECK(t.cpu_asr_threads == 11);
   // cpu_batch = clamp(11/2,2,6) = clamp(5,2,6) = 5
   CHECK(t.cpu_batch == 5);
@@ -183,7 +184,8 @@ TEST_CASE("fill_hetero agrees with decide() on het path") {
 
   AutoTune from_decide = decide(h, EngineConfig{});
   AutoTune from_fill;
-  fill_hetero(from_fill, h);
+  // decide() uses the num_files=0 sentinel (conservative multi-file); match it here.
+  fill_hetero(from_fill, h, 0);
 
   REQUIRE(from_decide.hetero == true);
   CHECK(from_fill.in_flight_files  == from_decide.in_flight_files);
@@ -192,6 +194,63 @@ TEST_CASE("fill_hetero agrees with decide() on het path") {
   CHECK(from_fill.gpu_batch        == from_decide.gpu_batch);
   CHECK(from_fill.num_threads      == from_decide.num_threads);
   CHECK(from_fill.batch            == from_decide.batch);
+}
+
+// ---- file-count-aware hetero thread split (reclaim idle producer cores) ----
+
+// The empirical bench10.wav sweep (C=16/RTX2080) showed cpu_asr_threads > C-P-1
+// REGRESSES single-file throughput, so the few-files branch caps at C-P-gpu_feed.
+// Net effect on C=16: cpu_asr_threads stays 11 for ALL file counts (the cap binds),
+// and in_flight_files stays P=4 always. We assert that invariance + the cap here.
+TEST_CASE("fill_hetero: file-count-aware split never exceeds the benchmarked cap") {
+  HardwareInfo h = hw_hetero(16, 40000);
+  const int P = 4, gpu_feed = 1;          // C=16 -> P=clamp(4,2,6)=4
+  const int cap = 16 - P - gpu_feed;      // = 11, the empirical optimum
+  // Sweep single-file through many-file: cpu_asr never exceeds the cap, in_flight==P.
+  for (int nf : {0, 1, 2, 3, 4, 6, 8, 50}) {
+    AutoTune t;
+    fill_hetero(t, h, nf);
+    INFO("num_files=" << nf << " cpu_asr=" << t.cpu_asr_threads
+         << " in_flight=" << t.in_flight_files);
+    CHECK(t.cpu_asr_threads <= cap);
+    CHECK(t.cpu_asr_threads >= 2);
+    CHECK(t.in_flight_files == P);
+    CHECK(t.num_threads == t.cpu_asr_threads);   // legacy mirror stays in sync
+  }
+}
+
+// Steady-state (num_files >= P+1) MUST preserve the hard no-oversubscription
+// invariant for every C the gate admits. The single-file/few-file path is allowed
+// a brief decode-phase overshoot, so the invariant is asserted for the multi-file
+// case only (mirrors fill_hetero's postcondition).
+TEST_CASE("fill_hetero: multi-file no-oversubscription invariant holds for all C") {
+  const int gpu_feed = 1;
+  for (int C : {12, 16, 24, 32}) {
+    HardwareInfo h = hw_hetero(C, 40000);
+    const int P = (C / 4 < 2) ? 2 : (C / 4 > 6 ? 6 : C / 4);
+    AutoTune t;
+    fill_hetero(t, h, P + 1);   // multi-file -> steady-state split
+    INFO("C=" << C << " in_flight=" << t.in_flight_files
+         << " cpu_asr=" << t.cpu_asr_threads);
+    CHECK(t.in_flight_files + gpu_feed + t.cpu_asr_threads <= C);
+  }
+}
+
+// For few-files the formula must NEVER sustain a 2x oversubscription, even though a
+// brief decode-phase overshoot of the strict steady-state bound is permitted.
+TEST_CASE("fill_hetero: few-files split never doubles core count") {
+  const int gpu_feed = 1;
+  for (int C : {12, 16, 24, 32}) {
+    HardwareInfo h = hw_hetero(C, 40000);
+    AutoTune t;
+    fill_hetero(t, h, 1);       // single file = most aggressive reclaim
+    INFO("C=" << C << " in_flight=" << t.in_flight_files
+         << " cpu_asr=" << t.cpu_asr_threads);
+    // Active producers during ASR is at most 1 (single file); the worst-case busy
+    // thread count is cpu_asr + gpu_feed + 1, which must stay well under 2*C.
+    CHECK(t.cpu_asr_threads + gpu_feed + 1 <= 2 * C);
+    CHECK(t.cpu_asr_threads <= C - 1);   // never claims every core (GPU host needs one)
+  }
 }
 
 // ---- T5: decide() optional max_batch / max_threads caps ----
