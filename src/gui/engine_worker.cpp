@@ -21,8 +21,16 @@
 namespace suji {
 
 namespace {
+// UTF-8-safe stem: find the last path separator and the last dot using ASCII
+// bytes only. UTF-8 is ASCII-transparent, so multibyte names (e.g. Chinese) are
+// preserved. std::filesystem's narrow path would mis-read UTF-8 as the system
+// ANSI codepage and mangle them (测试视频 -> 娴嬭瘯瑙嗛).
 static std::string stem(const std::string& p) {
-    return std::filesystem::path(p).stem().string();
+    size_t slash = p.find_last_of("/\\");
+    std::string name = (slash == std::string::npos) ? p : p.substr(slash + 1);
+    size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos && dot != 0) name = name.substr(0, dot);
+    return name;
 }
 } // namespace
 
