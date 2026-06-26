@@ -96,3 +96,54 @@ TEST_CASE("vad segment_stream honors cancel (P2)" * doctest::timeout(120)) {
   vad.segment_stream(ab, [&](SpeechSeg&&){ ++callbacks; return true; }, &cancel);
   CHECK(callbacks == 0);                   // cancel checked at loop entry -> no emission
 }
+
+// P3 (streaming decode) — KEY CORRECTNESS: feeding the SAME audio to the incremental
+// accept()/finish() API in DIFFERENT chunk sizes must yield byte-for-byte IDENTICAL
+// segments (count + start_sample + sample count), and those must equal the old
+// segment()/segment_stream() output. Window-aligned feeding buffers the remainder so the
+// AcceptWaveform call sequence is independent of how the input is chopped up.
+TEST_CASE("vad accept is chunk-invariant and equals segment (P3)" * doctest::timeout(180)) {
+  AudioBuffer ab; std::string err;
+  REQUIRE(decode_to_pcm(cfg().ffmpeg_path,
+    std::string(SUJI_DEFAULT_MODELS_DIR)+"/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/0.wav", ab, err));
+  Vad vad(cfg()); REQUIRE(vad.ok());
+
+  // Baseline: the whole-buffer collected path (segment() -> segment_stream()).
+  auto baseline = vad.segment(ab);
+  REQUIRE(baseline.size() >= 2);   // multiple segments make the comparison meaningful
+
+  // Helper: drive accept() with a fixed chunk size, then finish(); collect segments.
+  auto run_chunked = [&](int chunk) {
+    std::vector<SpeechSeg> out;
+    auto sink = [&](SpeechSeg&& s){ out.push_back(std::move(s)); return true; };
+    vad.reset();
+    const float* p = ab.samples.data();
+    int total = (int)ab.samples.size();
+    for (int i = 0; i < total; i += chunk) {
+      int n = (i + chunk <= total) ? chunk : (total - i);
+      REQUIRE(vad.accept(p + i, n, sink));   // no cancel -> never stops early
+    }
+    vad.finish(sink);
+    return out;
+  };
+
+  // Compare a chunked run against the baseline (identical count + start + sample count).
+  auto same_as_baseline = [&](const std::vector<SpeechSeg>& got){
+    REQUIRE(got.size() == baseline.size());
+    for (size_t i = 0; i < baseline.size(); ++i) {
+      CHECK(got[i].start_sample == baseline[i].start_sample);
+      CHECK(got[i].samples.size() == baseline[i].samples.size());
+    }
+  };
+
+  // One big call (whole buffer), then progressively pathological chunk sizes:
+  // tiny (< window), window-aligned, window+1 (forces leftover carry), an odd prime,
+  // and a large multi-window chunk. ALL must match the baseline exactly.
+  same_as_baseline(run_chunked((int)ab.samples.size()));  // single accept()
+  same_as_baseline(run_chunked(1));                       // one sample at a time
+  same_as_baseline(run_chunked(100));                     // < window_ (512)
+  same_as_baseline(run_chunked(512));                     // window-aligned
+  same_as_baseline(run_chunked(513));                     // window+1 (leftover carry)
+  same_as_baseline(run_chunked(997));                     // odd prime (never window-aligned)
+  same_as_baseline(run_chunked(40000));                   // large multi-window chunk
+}
