@@ -3,6 +3,7 @@
 #include "core/media_decode.h"
 #include "core/vad.h"
 #include "core/asr.h"
+#include "core/oom_retry.h"
 #include "core/punctuation.h"
 #include "core/segment_merge.h"
 #include "core/log.h"
@@ -76,15 +77,23 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
   std::atomic<size_t> next_file{0};
   std::atomic<int> files_done{0};
   std::atomic<long long> samples_done{0};
+  // G13: total DECODED audio duration in samples (full file length incl. silence),
+  // accumulated by producers. Drives the FINAL aggregate throughput (true audio-hours).
+  std::atomic<long long> decoded_samples{0};
 
   // producers: decode + VAD; push SegTask; record failures
   int nprod = std::max(1, tune.in_flight_files);
   std::vector<std::thread> producers;
   for(int t=0;t<nprod;t++){
     producers.emplace_back([&]{
+      // T11: build the Silero VAD ONCE per producer thread, not per file. The model
+      // is reloaded only nprod times total instead of once per input. Vad::segment()
+      // calls Reset() internally, so reusing one detector across files is safe.
+      Vad vad(cfg);
       size_t fi;
       while((fi=next_file.fetch_add(1)) < (size_t)N){
         if(cancel && cancel->is_cancelled()) break;   // stop taking new files on cancel
+        if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
         AudioBuffer ab; std::string err;
         if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err, cancel)){
           std::lock_guard<std::mutex> lk(err_mu);
@@ -92,12 +101,12 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
           results[fi].err = (err=="cancelled") ? "cancelled" : "decode: "+err;
           continue;
         }
+        // G13: count the full decoded duration of this file (incl. silence) for throughput.
+        decoded_samples += (long long)ab.samples.size();
         // A just-decoded file must not enter VAD if cancel landed during decode.
         if(cancel && cancel->is_cancelled()){
           std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="cancelled"; continue;
         }
-        Vad vad(cfg);
-        if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
         auto segs = vad.segment(ab, cancel);
         for(auto& s : segs){
           seg_pending[fi].fetch_add(1);              // R6 fix: count before push
@@ -110,6 +119,9 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
     });
   }
   // consumer: batch decode, route tokens by file_id
+  // G2: the cuda-only single path gets OOM halve-retry; the CPU path keeps its exact
+  // prior behaviour (a plain transcribe_batch call, no retry) so CPU is unaffected.
+  const bool gpu_retry = (tune.provider == Provider::Cuda);
   auto consumer_last_cb = std::chrono::steady_clock::time_point{};  // zero = never fired
   std::thread consumer([&]{
     SegTask first;
@@ -122,7 +134,9 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
       while((int)batch.size() < tune.batch && queue.try_pop(more)) batch.push_back(std::move(more));
       std::vector<Asr::SegView> views; views.reserve(batch.size());
       for(auto& b : batch) views.push_back({b.samples.data(),(int)b.samples.size()});
-      auto res = asr.transcribe_batch(views);
+      auto res = gpu_retry
+        ? transcribe_oom_safe(views, [&](const std::vector<Asr::SegView>& v){ return asr.transcribe_batch(v); })
+        : asr.transcribe_batch(views);
       if (res.size() != batch.size()){   // R3/T12: batch failed -> mark files, never a silent empty success
         mark_batch_failed(batch, res.size(), results, err_mu);
         continue;
@@ -140,6 +154,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
           consumer_last_cb = now;
           BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
           bp.audio_seconds_done=(double)samples_done.load()/16000.0;
+          bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
           cb(bp);
         }
       }
@@ -170,7 +185,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
       results[i].transcript = std::move(tr);
     }
     files_done++;                                  // count every file (ok or failed)
-    if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; cb(bp); }
+    if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; bp.total_audio_decoded=(double)decoded_samples.load()/16000.0; cb(bp); }
   }
   return results;
 }
@@ -222,6 +237,9 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   std::atomic<size_t> next_file{0};
   std::atomic<int> files_done{0};
   std::atomic<long long> samples_done{0};
+  // G13: total DECODED audio duration (full file length incl. silence), accumulated
+  // by producers. Drives the FINAL aggregate throughput (true audio-hours).
+  std::atomic<long long> decoded_samples{0};
   // H9: per-consumer segment counters for split-ratio observability
   std::atomic<long long> cpu_segs{0}, gpu_segs{0};
 
@@ -230,9 +248,13 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   std::vector<std::thread> producers;
   for(int t=0;t<nprod;t++){
     producers.emplace_back([&]{
+      // T11: build the Silero VAD ONCE per producer thread (see single path). Reused
+      // across files; Vad::segment() Resets internally so per-file segmentation is independent.
+      Vad vad(cfg);
       size_t fi;
       while((fi=next_file.fetch_add(1)) < (size_t)N){
         if(cancel && cancel->is_cancelled()) break;
+        if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
         AudioBuffer ab; std::string err;
         if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err, cancel)){
           std::lock_guard<std::mutex> lk(err_mu);
@@ -240,11 +262,11 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
           results[fi].err = (err=="cancelled") ? "cancelled" : "decode: "+err;
           continue;
         }
+        // G13: count the full decoded duration of this file (incl. silence) for throughput.
+        decoded_samples += (long long)ab.samples.size();
         if(cancel && cancel->is_cancelled()){
           std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="cancelled"; continue;
         }
-        Vad vad(cfg);
-        if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
         auto segs = vad.segment(ab, cancel);
         for(auto& s : segs){
           seg_pending[fi].fetch_add(1);              // R6 fix: count before push
@@ -256,12 +278,14 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
     });
   }
 
-  // One reusable consumer body, parameterized by (recognizer, batch_max, sink, seg_counter).
-  // Each recognizer handle is touched by exactly ONE thread.
+  // One reusable consumer body, parameterized by (recognizer, batch_max, sink, seg_counter,
+  // oom_retry). Each recognizer handle is touched by exactly ONE thread.
+  // G2: oom_retry=true (GPU consumer only) wraps transcribe in the halve-retry helper;
+  // the CPU consumer passes oom_retry=false and keeps its exact prior behaviour.
   std::atomic<bool> cb_lock{false};                  // tiny spinlock to serialize the throttled cb
   auto consumer_last_cb = std::chrono::steady_clock::time_point{};
   auto consume = [&](Asr& asr, int batch_max, std::vector<std::vector<Token>>& sink,
-                     std::atomic<long long>& seg_counter){
+                     std::atomic<long long>& seg_counter, bool oom_retry){
     SegTask first;
     while(queue.pop(first)){
       if(cancel && cancel->is_cancelled()){ queue.close(); break; }
@@ -272,7 +296,9 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
       while((int)batch.size() < batch_max && queue.try_pop(more)) batch.push_back(std::move(more));
       std::vector<Asr::SegView> views; views.reserve(batch.size());
       for(auto& b : batch) views.push_back({b.samples.data(),(int)b.samples.size()});
-      auto res = asr.transcribe_batch(views);
+      auto res = oom_retry
+        ? transcribe_oom_safe(views, [&](const std::vector<Asr::SegView>& v){ return asr.transcribe_batch(v); })
+        : asr.transcribe_batch(views);
       if(res.size() != batch.size()){   // R3/T12
         mark_batch_failed(batch, res.size(), results, err_mu);
         continue;
@@ -290,6 +316,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
           consumer_last_cb = now;
           BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
           bp.audio_seconds_done=(double)samples_done.load()/16000.0;
+          bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
           cb(bp);
         }
         cb_lock.store(false);
@@ -298,8 +325,9 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   };
 
   std::vector<std::thread> consumers;
-  if(cok) consumers.emplace_back([&]{ consume(cpu_asr, std::max(1,tune.cpu_batch), tok_cpu, cpu_segs); });
-  if(gok) consumers.emplace_back([&]{ consume(gpu_asr, std::max(1,tune.gpu_batch), tok_gpu, gpu_segs); });
+  // G2: CPU consumer -> no OOM retry (unchanged); CUDA consumer -> halve-retry on OOM.
+  if(cok) consumers.emplace_back([&]{ consume(cpu_asr, std::max(1,tune.cpu_batch), tok_cpu, cpu_segs, /*oom_retry=*/false); });
+  if(gok) consumers.emplace_back([&]{ consume(gpu_asr, std::max(1,tune.gpu_batch), tok_gpu, gpu_segs, /*oom_retry=*/true); });
 
   // Join order: producers -> close -> both consumers.
   for(auto& p:producers) p.join();
@@ -340,7 +368,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
       results[i].transcript = std::move(tr);
     }
     files_done++;
-    if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; cb(bp); }
+    if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; bp.total_audio_decoded=(double)decoded_samples.load()/16000.0; cb(bp); }
   }
   return results;
 }

@@ -1,6 +1,7 @@
 #include "doctest/doctest.h"
 #include "core/batch_engine.h"
 #include "core/config.h"
+#include "core/media_decode.h"
 #include <string>
 using namespace suji;
 static std::string md(){ return SUJI_DEFAULT_MODELS_DIR; }
@@ -26,6 +27,37 @@ TEST_CASE("batch isolates a bad file" * doctest::timeout(300)){
   CHECK(res[1].err.size()>0);
   CHECK(last_done == 3);   // progress counts ALL files incl. the failed one
 }
+// G13: BatchProgress.total_audio_decoded must equal the sum of the FULL decoded
+// durations of all files (incl. silence), not just the VAD-speech seconds. We compute
+// the ground truth by decoding each file directly and summing samples/16000, then
+// assert the engine's final total_audio_decoded matches within rounding tolerance.
+TEST_CASE("batch tracks full decoded audio duration for throughput (G13)" * doctest::timeout(300)){
+  std::string w=md()+"/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/";
+  std::vector<std::string> inputs={ w+"0.wav", w+"1.wav" };
+
+  // Ground truth: full decoded duration of each file (incl. silence).
+  double expect_total = 0.0;
+  for(auto& in : inputs){
+    AudioBuffer ab; std::string err;
+    REQUIRE(decode_to_pcm(cfg().ffmpeg_path, in, ab, err));
+    expect_total += (double)ab.samples.size()/16000.0;
+  }
+  REQUIRE(expect_total > 0.0);
+
+  AutoTune tune; tune.provider=Provider::Cpu; tune.batch=4; tune.in_flight_files=2; tune.num_threads=4;
+  double last_total = 0.0, last_speech = 0.0;
+  auto res = transcribe_batch_files(inputs, cfg(), tune, [&](const BatchProgress& b){
+    last_total  = b.total_audio_decoded;
+    last_speech = b.audio_seconds_done;
+  });
+  REQUIRE(res.size()==2);
+  for(auto& r : res) CHECK(r.ok);
+  // total_audio_decoded equals the sum of full decoded file durations.
+  CHECK(last_total == doctest::Approx(expect_total).epsilon(0.001));
+  // sanity: full audio (incl. silence) >= VAD-speech-only seconds.
+  CHECK(last_total >= last_speech);
+}
+
 TEST_CASE("live progress fires during transcription (not only at finalize)" * doctest::timeout(300)){
   // 0.wav has multiple VAD segments -> multiple consumer batches -> consumer cb fires > 1 time
   // finalize loop fires exactly 1 time (one file). So cb_count > 1 proves live emission.

@@ -193,8 +193,10 @@ int main(int argc, char** argv) {
 
   auto t0 = std::chrono::steady_clock::now();
   double last_audio = 0.0;
+  double total_decoded = 0.0;   // G13: full decoded audio duration (incl. silence) for throughput
   auto res = transcribe_batch_files(todo, c, tune, [&](const BatchProgress& b) {
     last_audio = b.audio_seconds_done;
+    total_decoded = b.total_audio_decoded;
     double el  = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     double eta = b.files_done > 0
       ? el * static_cast<double>(b.files_total - b.files_done) / static_cast<double>(b.files_done)
@@ -227,7 +229,11 @@ int main(int argc, char** argv) {
       log_err("FAILED " + r.input + ": " + r.err);
     }
   }
-  std::printf("\ndone: %d/%zu ok, skipped(resumed)=%d, failed=%d, wall=%.1fs, throughput=%.1fx realtime\n",
-    okc, todo.size(), skipped, failc, wall, wall > 0 ? last_audio / wall : 0.0);
+  // G13: report throughput on the FULL decoded audio duration (incl. silence) so it
+  // reflects true aggregate audio-hours/wall-hours, not just VAD-speech seconds.
+  // Fall back to last_audio (speech) only if the decoded total is unavailable.
+  double audio_for_tput = total_decoded > 0.0 ? total_decoded : last_audio;
+  std::printf("\ndone: %d/%zu ok, skipped(resumed)=%d, failed=%d, wall=%.1fs, audio=%.0fs, throughput=%.1fx realtime\n",
+    okc, todo.size(), skipped, failc, wall, audio_for_tput, wall > 0 ? audio_for_tput / wall : 0.0);
   return (okc > 0 || skipped > 0) ? 0 : 1;
 }
