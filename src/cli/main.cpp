@@ -6,6 +6,12 @@
 #include <filesystem>
 #include <string>
 #include <cstdio>
+#ifdef _WIN32
+  #ifndef NOMINMAX
+  #define NOMINMAX
+  #endif
+  #include <windows.h>
+#endif
 using namespace suji;
 namespace fs = std::filesystem;
 static std::string stem(const std::string& p){
@@ -30,6 +36,12 @@ static std::string unique_base(const std::string& base, const EngineConfig& cfg)
   return b;
 }
 int main(int argc, char** argv){
+#ifdef _WIN32
+  // Render UTF-8 log bytes (e.g. 解码/切分语音/Chinese filenames) correctly on a
+  // Chinese console (codepage 936/GBK would otherwise show mojibake like 瑙ｇ爜).
+  SetConsoleOutputCP(CP_UTF8);
+  SetConsoleCP(CP_UTF8);
+#endif
   if (argc < 2){ std::puts("usage: suji_cli <input> [-o out_dir] [--provider cpu|cuda|hetero] [--rule-fsts f.fst] [--no-srt|--no-vtt|--no-json|--no-md]"); return 2; }
   EngineConfig c;
   { auto mp = default_model_paths();

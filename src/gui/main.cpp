@@ -18,6 +18,12 @@
 
 int main(int argc, char** argv)
 {
+    // Render UTF-8 log bytes (e.g. 解码/切分语音/Chinese filenames) correctly on an
+    // attached console (codepage 936/GBK would otherwise show mojibake like 瑙ｇ爜).
+    // The Qt log panel decodes UTF-8 itself and is unaffected; this only fixes stderr.
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
     // Windows: char** argv is ANSI-mangled for non-ASCII paths. Fetch the real
     // UTF-16 command line so --selftest* can receive Chinese/Unicode file paths
     // (the normal GUI gets paths from Qt as UTF-16, so it is unaffected).
