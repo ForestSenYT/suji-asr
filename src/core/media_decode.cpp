@@ -1,6 +1,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include "core/media_decode.h"
+#include "core/cancel.h"
 #include <vector>
 #include <string>
 
@@ -17,7 +18,8 @@ static std::wstring utf8_to_wide(const std::string& utf8) {
 }
 
 bool decode_to_pcm(const std::string& ffmpeg, const std::string& input,
-                   AudioBuffer& out, std::string& err) {
+                   AudioBuffer& out, std::string& err,
+                   const CancelToken* cancel) {
     // --- Convert paths from UTF-8 to UTF-16 ---
     std::wstring ffmpeg_w = utf8_to_wide(ffmpeg);
     std::wstring input_w  = utf8_to_wide(input);
@@ -106,6 +108,17 @@ bool decode_to_pcm(const std::string& ffmpeg, const std::string& input,
     DWORD bytes_read = 0;
     while (ReadFile(pipe_read, chunk.data(), static_cast<DWORD>(chunk.size()), &bytes_read, nullptr)
            && bytes_read > 0) {
+        if (cancel && cancel->is_cancelled()) {
+            // Kill ffmpeg immediately — do not wait for EOF on the whole file.
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pipe_read);
+            WaitForSingleObject(pi.hProcess, 5000);  // reap the terminated child
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            out.samples.clear();
+            err = "cancelled";
+            return false;
+        }
         raw_bytes.insert(raw_bytes.end(), chunk.begin(), chunk.begin() + bytes_read);
     }
 
