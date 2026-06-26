@@ -169,15 +169,25 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
         bool wasCancelled = (!r.ok && r.err == "cancelled");
 
         if (r.ok) {
-            ++okCount;
             std::string base = outDirStd + "/" + stem(r.input);
-            write_outputs(r.transcript, base, c, stem(r.input));
-            emit fileResult(
-                QString::fromUtf8(r.input.c_str()),
-                true,
-                static_cast<int>(r.transcript.segments.size()),
-                QString()
-            );
+            if (write_outputs(r.transcript, base, c, stem(r.input))) {
+                ++okCount;
+                emit fileResult(
+                    QString::fromUtf8(r.input.c_str()),
+                    true,
+                    static_cast<int>(r.transcript.segments.size()),
+                    QString()
+                );
+            } else {
+                ++failedCount;
+                log_err("write failed: " + base);
+                emit fileResult(
+                    QString::fromUtf8(r.input.c_str()),
+                    false,
+                    0,
+                    QStringLiteral("write failed")
+                );
+            }
         } else if (wasCancelled) {
             ++cancelledCount;
             emit fileResult(

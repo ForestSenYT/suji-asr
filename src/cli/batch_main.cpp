@@ -71,10 +71,22 @@ int main(int argc, char** argv) {
     std::string a = argv[i];
     if      (a == "-o"             && i + 1 < argc) out_dir               = argv[++i];
     else if (a == "--provider"     && i + 1 < argc) prov                  = argv[++i];
-    else if (a == "--batch"        && i + 1 < argc) fbatch                = parse_positive_int(argv[++i]);
-    else if (a == "--cpu-batch"    && i + 1 < argc) fcpu_batch            = parse_positive_int(argv[++i]);
-    else if (a == "--gpu-batch"    && i + 1 < argc) fgpu_batch            = parse_positive_int(argv[++i]);
-    else if (a == "--in-flight"    && i + 1 < argc) finflight             = parse_positive_int(argv[++i]);
+    else if (a == "--batch"        && i + 1 < argc) {
+      fbatch = parse_positive_int(argv[++i]);
+      if (fbatch == 0) { log_err("--batch requires a positive integer, got: " + std::string(argv[i])); return 2; }
+    }
+    else if (a == "--cpu-batch"    && i + 1 < argc) {
+      fcpu_batch = parse_positive_int(argv[++i]);
+      if (fcpu_batch == 0) { log_err("--cpu-batch requires a positive integer, got: " + std::string(argv[i])); return 2; }
+    }
+    else if (a == "--gpu-batch"    && i + 1 < argc) {
+      fgpu_batch = parse_positive_int(argv[++i]);
+      if (fgpu_batch == 0) { log_err("--gpu-batch requires a positive integer, got: " + std::string(argv[i])); return 2; }
+    }
+    else if (a == "--in-flight"    && i + 1 < argc) {
+      finflight = parse_positive_int(argv[++i]);
+      if (finflight == 0) { log_err("--in-flight requires a positive integer, got: " + std::string(argv[i])); return 2; }
+    }
     else if (a == "--cuda-dll-dir" && i + 1 < argc) cuda_dll_dir_override = argv[++i];
     else if (a == "--resume")     resume = true;
     else if (a == "--no-resume")  resume = false;
@@ -205,7 +217,11 @@ int main(int argc, char** argv) {
       while (used_bases.count(b)) { b = base + "_" + std::to_string(n++); }
       used_bases.insert(b);
       if (b != base) log_err("output stem collision for '" + r.input + "' -> writing as " + b);
-      write_outputs(r.transcript, b, c, stem(r.input));
+      if (!write_outputs(r.transcript, b, c, stem(r.input))) {
+        log_err("write failed: " + b);
+        okc--;   // was pre-incremented; undo it
+        failc++;
+      }
     } else {
       failc++;
       log_err("FAILED " + r.input + ": " + r.err);
