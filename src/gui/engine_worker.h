@@ -14,7 +14,8 @@ public:
 
 public slots:
     void run(QStringList inputs, QString outDir, QString provider,
-             bool srt, bool vtt, bool json, bool md);
+             bool srt, bool vtt, bool json, bool md,
+             int batchOverride = 0, int inFlightOverride = 0);
     void requestCancel(); // thread-safe: direct atomic store, callable from any thread
 
 signals:
