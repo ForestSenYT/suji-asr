@@ -1,6 +1,7 @@
 #pragma once
 #include "core/types.h"
 #include "core/config.h"
+#include "core/cancel.h"
 #include <vector>
 struct SherpaOnnxVoiceActivityDetector;
 namespace suji {
@@ -10,7 +11,8 @@ public:
   ~Vad();
   Vad(const Vad&) = delete; Vad& operator=(const Vad&) = delete;
   bool ok() const { return vad_ != nullptr; }
-  std::vector<SpeechSeg> segment(const AudioBuffer& audio);
+  std::vector<SpeechSeg> segment(const AudioBuffer& audio,
+                                 const CancelToken* cancel = nullptr);
 private:
   const SherpaOnnxVoiceActivityDetector* vad_ = nullptr;
   int window_ = 512;

@@ -15,12 +15,15 @@ Vad::Vad(const EngineConfig& cfg) {
   vad_ = SherpaOnnxCreateVoiceActivityDetector(&c, 60.0f);
 }
 Vad::~Vad(){ if (vad_) SherpaOnnxDestroyVoiceActivityDetector(vad_); }
-std::vector<SpeechSeg> Vad::segment(const AudioBuffer& audio) {
+std::vector<SpeechSeg> Vad::segment(const AudioBuffer& audio, const CancelToken* cancel) {
   std::vector<SpeechSeg> out;
   if (!vad_) return out;
   const float* p = audio.samples.data();
   int64_t total = (int64_t)audio.samples.size();
-  for (int64_t i = 0; i + window_ <= total; i += window_) {
+  int64_t window_count = 0;
+  for (int64_t i = 0; i + window_ <= total; i += window_, ++window_count) {
+    // Check cancel every 64 windows (~32k samples ≈ 2 s of audio); cheap, prompt abort.
+    if (cancel && (window_count % 64 == 0) && cancel->is_cancelled()) break;
     SherpaOnnxVoiceActivityDetectorAcceptWaveform(vad_, p + i, window_);
     while (!SherpaOnnxVoiceActivityDetectorEmpty(vad_)) {
       const SherpaOnnxSpeechSegment* s = SherpaOnnxVoiceActivityDetectorFront(vad_);
