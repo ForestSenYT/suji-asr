@@ -16,6 +16,20 @@
 - ✅ **但项目目标已达成**:**CPU 模式 4.95× 实时,已 ~5× 碾压豆包(RTF≈1)**。3 小时讲课单文件 ~36 分钟转完,一晚可清一大批;且多文件并行 + 错误隔离 + 自动续跑。**在 dev 2080 上 GPU 非必需**——但部署机(3070 Ti)可能不同,见下。
 - **程序运行期自适应(不在 dev 机写死)**:`auto` 自动检测「可用 N 卡 + CUDA 运行时」→ 有就走 GPU、没有走 CPU,无需 flag(`decide()` + `core/paths.cpp::cuda_dll_dir()`,崩溃安全);安装包 all-in-one 含 CUDA。**在 dev 2080 上 GPU 较慢**,可 `--provider cpu` 覆盖;**在 3070 Ti 上 `auto` 会自动用 GPU**,实测吞吐由该机 benchmark 决定是否保留这个默认。
 
+## ⭐⭐ 异构 CPU+GPU 引擎(H8 实测,dev 2080)— 2026-06-26
+让 CPU recognizer 与 CUDA recognizer **同进程并行**,共享一个有界队列做 work-stealing(快的引擎自然多拿活)。6 文件 × 60s = 6 min 音频,`--provider` 三测:
+
+| 模式 | 墙钟 | 吞吐 |
+|---|---|---|
+| CPU(16 线程) | 77.1s | 3.4× |
+| CUDA(2080) | 145.5s | 1.8× |
+| **HETERO(CPU+GPU 并行)** | **67.2s** | **3.9× ← 最快** |
+
+- **异构是三者最快**(3.9× > CPU 3.4× > CUDA 1.8×):把本来闲置的 GPU 用起来,净增 ~15%(CPU 半边从 16→11 线程,但 GPU 补回有余)。`decide()` 在 16 核+可用 GPU 的机器上默认选 hetero(确为最快路径)。
+- **R5 闸门**:3.9/3.4 = 1.147×,几乎贴着 1.15× 门槛——2080 上 GPU 对 int8 弱,异构收益偏小但为正。
+- 短文件(60s)启动开销占比大致 CPU 实测仅 3.4×(< 长音频 4.95×);长讲座(数十分钟)三者都更高,异构 margin 预期更稳。
+- **3070 Ti(NEEDS-HUMAN)**:Ampere int8 张量核更强 → GPU 半边贡献更大,异构 margin 预期明显更高;fp16 模型更甚。请在该机跑 `--provider cpu|cuda|hetero` 三测确认。
+
 ## NEEDS-HUMAN(方向性,留给你定)
 1. **是否为 GPU 投入 fp16 模型?** 鉴于 CPU 已 5× 碾压豆包,**大概率不必**(投入产出低)。若要,需找/转 FireRedASR 的 fp16 ONNX。
 2. **部署目标 3070 Ti(Ampere)**:Ampere int8 张量核优于 Turing,但 ORT int8-on-CUDA 的限制可能仍在 → **建议在 3070 Ti 上跑一次 `scripts\benchmark.ps1` 确认**。若 GPU 仍不快,部署直接全用 CPU(更省事、无 CUDA DLL 打包负担)。
