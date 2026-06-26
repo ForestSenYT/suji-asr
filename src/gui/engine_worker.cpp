@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -164,12 +165,20 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     int okCount        = 0;
     int failedCount    = 0;
     int cancelledCount = 0;
+    std::set<std::string> used_bases;  // G6: dedup output stems across the batch
 
     for (const FileResult& r : results) {
         bool wasCancelled = (!r.ok && r.err == "cancelled");
 
         if (r.ok) {
-            std::string base = outDirStd + "/" + stem(r.input);
+            // G6: deduplicate output base when two inputs share the same filename
+            std::string base_candidate = outDirStd + "/" + stem(r.input);
+            std::string base = base_candidate;
+            int n = 2;
+            while (used_bases.count(base)) { base = base_candidate + "_" + std::to_string(n++); }
+            used_bases.insert(base);
+            if (base != base_candidate)
+                log_err("output stem collision for '" + r.input + "' -> writing as " + base);
             if (write_outputs(r.transcript, base, c, stem(r.input))) {
                 ++okCount;
                 emit fileResult(
