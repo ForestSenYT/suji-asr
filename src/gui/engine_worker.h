@@ -20,7 +20,9 @@ public slots:
 
 signals:
     void started(QString provider, int filesTotal);
-    void progress(int filesDone, int filesTotal, double audioSec, double totalAudioSec);
+    // cpuSegs/gpuSegs: live hetero CPU/GPU segment split (0/0 for single-provider paths).
+    void progress(int filesDone, int filesTotal, double audioSec, double totalAudioSec,
+                  long long cpuSegs, long long gpuSegs);
     void fileResult(QString path, bool ok, int segments, QString err);
     void finished(int ok, int failed, int cancelled, double wallSec);
 

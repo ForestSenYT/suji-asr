@@ -192,7 +192,8 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     auto results = transcribe_batch_files(
         todo, c, tune,
         [this, totalAudio](const BatchProgress& b) {
-            emit progress(b.files_done, b.files_total, b.audio_seconds_done, totalAudio);
+            emit progress(b.files_done, b.files_total, b.audio_seconds_done, totalAudio,
+                          b.cpu_segs, b.gpu_segs);
         },
         &cancel_
     );
