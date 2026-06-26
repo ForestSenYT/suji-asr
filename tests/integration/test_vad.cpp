@@ -4,6 +4,10 @@
 #include "core/config.h"
 #include "core/cancel.h"
 #include <vector>
+#include <chrono>
+#include <thread>
+#include <atomic>
+#include <windows.h>
 using namespace suji;
 static EngineConfig cfg(){ EngineConfig c; c.ffmpeg_path=SUJI_DEFAULT_FFMPEG;
   c.vad_model=std::string(SUJI_DEFAULT_MODELS_DIR)+"/silero_vad.onnx"; return c; }
@@ -146,4 +150,146 @@ TEST_CASE("vad accept is chunk-invariant and equals segment (P3)" * doctest::tim
   same_as_baseline(run_chunked(513));                     // window+1 (leftover carry)
   same_as_baseline(run_chunked(997));                     // odd prime (never window-aligned)
   same_as_baseline(run_chunked(40000));                   // large multi-window chunk
+}
+
+// P3 (streaming decode) — STREAMING EQUIVALENCE: decode_vad_stream on a real wav must
+// emit the SAME segments (count + start_sample + sample count) as the two-step path
+// decode_to_pcm + vad.segment on that same wav. This proves feeding ffmpeg's PCM
+// incrementally yields identical segmentation to buffering the whole file first.
+TEST_CASE("decode_vad_stream equals decode_to_pcm + segment (P3)" * doctest::timeout(180)) {
+  std::string wav = std::string(SUJI_DEFAULT_MODELS_DIR)
+                  + "/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/0.wav";
+
+  // Two-step baseline.
+  AudioBuffer ab; std::string err;
+  REQUIRE(decode_to_pcm(cfg().ffmpeg_path, wav, ab, err));
+  Vad vbase(cfg()); REQUIRE(vbase.ok());
+  auto baseline = vbase.segment(ab);
+  REQUIRE(baseline.size() >= 1);
+
+  // Streaming path: same Vad reused is fine (decode_vad_stream calls reset() internally).
+  Vad vstream(cfg()); REQUIRE(vstream.ok());
+  std::vector<SpeechSeg> streamed; std::string serr;
+  bool ok = decode_vad_stream(cfg().ffmpeg_path, wav, vstream,
+    [&](SpeechSeg&& s){ streamed.push_back(std::move(s)); return true; }, serr);
+  REQUIRE_MESSAGE(ok, serr);
+
+  REQUIRE(streamed.size() == baseline.size());
+  for (size_t i = 0; i < baseline.size(); ++i) {
+    CHECK(streamed[i].start_sample == baseline[i].start_sample);
+    CHECK(streamed[i].samples.size() == baseline[i].samples.size());
+  }
+}
+
+// P3 — decode_vad_stream returns false + err for a missing input (spawn/no-audio path).
+TEST_CASE("decode_vad_stream missing file fails" * doctest::timeout(30)) {
+  Vad vad(cfg()); REQUIRE(vad.ok());
+  std::string err;
+  bool ok = decode_vad_stream(cfg().ffmpeg_path, "no_such_file_xyz.wav", vad,
+    [&](SpeechSeg&&){ return true; }, err);
+  CHECK_FALSE(ok);
+  CHECK_FALSE(err.empty());
+}
+
+// P3 — a pre-cancelled token aborts decode_vad_stream quickly (TerminateProcess),
+// returning false with err == "cancelled" in well under 2 s on a long file.
+TEST_CASE("decode_vad_stream respects pre-cancelled token" * doctest::timeout(30)) {
+  // Build a ~120s wav by looping the short test wav inside ffmpeg (same trick as the
+  // media_decode cancel test).
+  wchar_t tmp_buf[MAX_PATH];
+  GetTempPathW(MAX_PATH, tmp_buf);
+  std::wstring tmp_dir_w(tmp_buf);
+  if (!tmp_dir_w.empty() && tmp_dir_w.back() == L'\\') tmp_dir_w.pop_back();
+  std::wstring long_w = tmp_dir_w + L"\\suji_stream_cancel_long.wav";
+  int n = WideCharToMultiByte(CP_UTF8, 0, long_w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  std::string long_wav(n - 1, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, long_w.c_str(), -1, long_wav.data(), n, nullptr, nullptr);
+
+  std::string src = std::string(SUJI_DEFAULT_MODELS_DIR)
+                  + "/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/0.wav";
+  {
+    int sn = MultiByteToWideChar(CP_UTF8, 0, src.c_str(), -1, nullptr, 0);
+    std::wstring src_w(sn - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, src.c_str(), -1, src_w.data(), sn);
+    int fn = MultiByteToWideChar(CP_UTF8, 0, cfg().ffmpeg_path.c_str(), -1, nullptr, 0);
+    std::wstring ffmpeg_w(fn - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, cfg().ffmpeg_path.c_str(), -1, ffmpeg_w.data(), fn);
+    std::wstring cmd = L"\"" + ffmpeg_w + L"\" -y -stream_loop 15 -i \""
+                     + src_w + L"\" -t 120 -ar 16000 -ac 1 \"" + long_w + L"\"";
+    SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, 0, nullptr);
+    STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nullptr; si.hStdOutput = nul; si.hStdError = nul;
+    PROCESS_INFORMATION pi{};
+    BOOL spawned = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr,
+                                  TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    REQUIRE_MESSAGE(spawned, "ffmpeg -stream_loop failed to spawn");
+    WaitForSingleObject(pi.hProcess, 30000);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+  }
+
+  Vad vad(cfg()); REQUIRE(vad.ok());
+  CancelToken tok; tok.cancel();   // pre-cancelled
+  std::string err;
+  auto t0 = std::chrono::steady_clock::now();
+  bool result = decode_vad_stream(cfg().ffmpeg_path, long_wav, vad,
+    [&](SpeechSeg&&){ return true; }, err, &tok);
+  double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  CHECK_FALSE(result);
+  CHECK(err == "cancelled");
+  CHECK(elapsed < 2.0);
+  DeleteFileW(long_w.c_str());
+}
+
+// P3 — MID-STREAM cancel: a token cancelled by a worker thread shortly after the stream
+// starts must stop emission and return false ("cancelled"), not run to EOF.
+TEST_CASE("decode_vad_stream mid-stream cancel stops" * doctest::timeout(30)) {
+  // Build a ~60s wav so there is real streaming time to cancel within.
+  wchar_t tmp_buf[MAX_PATH];
+  GetTempPathW(MAX_PATH, tmp_buf);
+  std::wstring tmp_dir_w(tmp_buf);
+  if (!tmp_dir_w.empty() && tmp_dir_w.back() == L'\\') tmp_dir_w.pop_back();
+  std::wstring long_w = tmp_dir_w + L"\\suji_stream_midcancel_long.wav";
+  int n = WideCharToMultiByte(CP_UTF8, 0, long_w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  std::string long_wav(n - 1, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, long_w.c_str(), -1, long_wav.data(), n, nullptr, nullptr);
+
+  std::string src = std::string(SUJI_DEFAULT_MODELS_DIR)
+                  + "/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/0.wav";
+  {
+    int sn = MultiByteToWideChar(CP_UTF8, 0, src.c_str(), -1, nullptr, 0);
+    std::wstring src_w(sn - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, src.c_str(), -1, src_w.data(), sn);
+    int fn = MultiByteToWideChar(CP_UTF8, 0, cfg().ffmpeg_path.c_str(), -1, nullptr, 0);
+    std::wstring ffmpeg_w(fn - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, cfg().ffmpeg_path.c_str(), -1, ffmpeg_w.data(), fn);
+    std::wstring cmd = L"\"" + ffmpeg_w + L"\" -y -stream_loop 8 -i \""
+                     + src_w + L"\" -t 60 -ar 16000 -ac 1 \"" + long_w + L"\"";
+    SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, 0, nullptr);
+    STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nullptr; si.hStdOutput = nul; si.hStdError = nul;
+    PROCESS_INFORMATION pi{};
+    BOOL spawned = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr,
+                                  TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    REQUIRE_MESSAGE(spawned, "ffmpeg -stream_loop failed to spawn");
+    WaitForSingleObject(pi.hProcess, 30000);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+  }
+
+  Vad vad(cfg()); REQUIRE(vad.ok());
+  CancelToken tok;
+  // Cancel from another thread ~50ms after the stream starts (mid-stream).
+  std::thread canceller([&]{ std::this_thread::sleep_for(std::chrono::milliseconds(50)); tok.cancel(); });
+  std::string err;
+  bool result = decode_vad_stream(cfg().ffmpeg_path, long_wav, vad,
+    [&](SpeechSeg&&){ return true; }, err, &tok);
+  canceller.join();
+  CHECK_FALSE(result);
+  CHECK(err == "cancelled");
+  DeleteFileW(long_w.c_str());
 }

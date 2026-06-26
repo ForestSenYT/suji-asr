@@ -4,6 +4,7 @@
 #include "core/cancel.h"
 #include <vector>
 #include <string>
+#include <cstring>
 
 namespace suji {
 
@@ -143,6 +144,143 @@ bool decode_to_pcm(const std::string& ffmpeg, const std::string& input,
     // memcpy is defined for type-punning in C++17 (std::byte / unsigned char aliasing rule)
     std::memcpy(out.samples.data(), raw_bytes.data(), n_floats * sizeof(float));
 
+    return true;
+}
+
+bool decode_vad_stream(const std::string& ffmpeg, const std::string& input, Vad& vad,
+                       const std::function<bool(SpeechSeg&&)>& on_seg, std::string& err,
+                       const CancelToken* cancel, int64_t* total_samples_out) {
+    // --- Convert paths from UTF-8 to UTF-16 (identical to decode_to_pcm) ---
+    std::wstring ffmpeg_w = utf8_to_wide(ffmpeg);
+    std::wstring input_w  = utf8_to_wide(input);
+
+    if (ffmpeg_w.empty()) { err = "decode_vad_stream: empty ffmpeg path"; return false; }
+    if (input_w.empty())  { err = "decode_vad_stream: empty input path";  return false; }
+
+    std::wstring cmdline = L"\"" + ffmpeg_w + L"\" -nostdin -loglevel error -i \""
+                         + input_w + L"\" -vn -ar 16000 -ac 1 -f f32le -";
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength        = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE pipe_read  = INVALID_HANDLE_VALUE;
+    HANDLE pipe_write = INVALID_HANDLE_VALUE;
+    if (!CreatePipe(&pipe_read, &pipe_write, &sa, 0)) {
+        err = "decode_vad_stream: CreatePipe failed (err=" + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    if (!SetHandleInformation(pipe_read, HANDLE_FLAG_INHERIT, 0)) {
+        err = "decode_vad_stream: SetHandleInformation failed (err=" + std::to_string(GetLastError()) + ")";
+        CloseHandle(pipe_read);
+        CloseHandle(pipe_write);
+        return false;
+    }
+
+    HANDLE nul_handle = CreateFileW(L"NUL", GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    &sa, OPEN_EXISTING, 0, nullptr);
+    if (nul_handle == INVALID_HANDLE_VALUE) {
+        err = "decode_vad_stream: failed to open NUL device (err=" + std::to_string(GetLastError()) + ")";
+        CloseHandle(pipe_read);
+        CloseHandle(pipe_write);
+        return false;
+    }
+
+    STARTUPINFOW si{};
+    si.cb         = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = nullptr;
+    si.hStdOutput = pipe_write;
+    si.hStdError  = nul_handle;
+
+    PROCESS_INFORMATION pi{};
+    BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr,
+                             TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+
+    CloseHandle(pipe_write);
+    CloseHandle(nul_handle);
+
+    if (!ok) {
+        err = "decode_vad_stream: CreateProcessW failed (err=" + std::to_string(GetLastError()) + ")";
+        CloseHandle(pipe_read);
+        return false;
+    }
+
+    // Helper: terminate ffmpeg + reap + close handles. Used on cancel and on early stop.
+    auto kill_child = [&]() {
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pipe_read);
+        WaitForSingleObject(pi.hProcess, 5000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    };
+
+    // --- Stream: feed each PCM read INCREMENTALLY into the VAD (no whole-file buffer) ---
+    vad.reset();
+    int64_t total_samples = 0;      // total float samples seen (for the no-audio check)
+    bool stopped = false;           // on_seg/cancel asked the VAD to stop early
+
+    // ffmpeg writes f32le; a single ReadFile may end mid-float, so carry the trailing
+    // < 4 bytes to the next read. `bytebuf` = [carry bytes] + [this read]; we consume
+    // whole floats from its front and keep the 0..3 leftover for next time. A 16-bit
+    // pipe almost always returns 4-byte-aligned reads, so the carry is usually empty.
+    std::vector<BYTE> bytebuf; bytebuf.reserve(65536 + 4);
+    std::vector<BYTE> chunk(65536);
+    std::vector<float> floats; floats.reserve(65536 / sizeof(float) + 1);
+    DWORD bytes_read = 0;
+    while (ReadFile(pipe_read, chunk.data(), static_cast<DWORD>(chunk.size()), &bytes_read, nullptr)
+           && bytes_read > 0) {
+        if (cancel && cancel->is_cancelled()) {
+            kill_child();
+            err = "cancelled";
+            return false;
+        }
+        bytebuf.insert(bytebuf.end(), chunk.begin(), chunk.begin() + bytes_read);
+        size_t n_floats = bytebuf.size() / sizeof(float);
+        if (n_floats > 0) {
+            size_t consumed = n_floats * sizeof(float);
+            floats.resize(n_floats);
+            // memcpy is defined for type-punning in C++17 (unsigned char aliasing rule).
+            std::memcpy(floats.data(), bytebuf.data(), consumed);
+            // Drop the consumed bytes; keep only the 0..3 leftover partial-float bytes.
+            bytebuf.erase(bytebuf.begin(), bytebuf.begin() + consumed);
+            total_samples += (int64_t)n_floats;
+            // Feed this read's floats into the VAD; emit segments as found.
+            if (!vad.accept(floats.data(), (int)n_floats, on_seg, cancel)) {
+                stopped = true;
+                kill_child();
+                if (cancel && cancel->is_cancelled()) { err = "cancelled"; return false; }
+                break;   // on_seg returned false (backpressure/non-cancel stop)
+            }
+        }
+    }
+
+    if (stopped) {
+        // Early stop already terminated ffmpeg + closed handles inside the loop.
+        return true;   // not an error: caller asked to stop emitting (backpressure)
+    }
+
+    // Clean EOF: flush the VAD tail, then reap ffmpeg.
+    if (cancel && cancel->is_cancelled()) {
+        kill_child();
+        err = "cancelled";
+        return false;
+    }
+    vad.finish(on_seg);
+
+    CloseHandle(pipe_read);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    if (total_samples == 0) {
+        err = "ffmpeg produced no audio (exit=" + std::to_string(exit_code) + ")";
+        return false;
+    }
+    if (total_samples_out) *total_samples_out = total_samples;
     return true;
 }
 

@@ -120,28 +120,18 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
       while((fi=next_file.fetch_add(1)) < (size_t)N){
         if(cancel && cancel->is_cancelled()) break;   // stop taking new files on cancel
         if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
-        AudioBuffer ab; std::string err;
+        std::string err;
         log_info("解码: " + basename_utf8(inputs[fi]));   // C1: decode begins
-        if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err, cancel)){
-          std::lock_guard<std::mutex> lk(err_mu);
-          results[fi].ok=false;
-          results[fi].err = (err=="cancelled") ? "cancelled" : "decode: "+err;
-          continue;
-        }
-        // G13: count the full decoded duration of this file (incl. silence) for throughput.
-        decoded_samples += (long long)ab.samples.size();
-        // A just-decoded file must not enter VAD if cancel landed during decode.
-        if(cancel && cancel->is_cancelled()){
-          std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="cancelled"; continue;
-        }
-        // P2: STREAM VAD segments to the queue the instant each is emitted, so the
-        // consumers start transcribing while VAD is still running over the rest of this
-        // file (eliminates the single-file decode+VAD dead-wait). Same per-segment
-        // bookkeeping as before — only the emission becomes incremental. queue.push
-        // blocks on a full queue = natural backpressure. Returning false from the
-        // callback on cancel stops further emission promptly.
+        // P3: STREAMING decode+VAD. ffmpeg's PCM is fed INCREMENTALLY into the VAD as it
+        // decodes; each speech segment is pushed to the queue the instant it is found, so
+        // consumers start transcribing within seconds even for a multi-hour file, and we
+        // never hold the whole file in RAM. Per-segment bookkeeping is unchanged; segment
+        // start_sample stays global (the stream is fed continuously, no offset math).
+        // queue.push blocks on a full queue = backpressure; false from the callback on
+        // cancel stops emission + terminates ffmpeg.
         long long produced = 0;
-        vad.segment_stream(ab, [&](SpeechSeg&& s) -> bool {
+        int64_t file_samples = 0;
+        bool ok = decode_vad_stream(cfg.ffmpeg_path, inputs[fi], vad, [&](SpeechSeg&& s) -> bool {
           if(cancel && cancel->is_cancelled()) return false;   // stop emitting on cancel
           seg_pending[fi].fetch_add(1);              // R6 fix: count before push
           segs_total.fetch_add(1);                   // segment-based progress: total grows as files are VADed
@@ -150,7 +140,15 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
           queue.push(std::move(st));                 // blocks if queue full (backpressure)
           ++produced;
           return true;
-        }, cancel);
+        }, err, cancel, &file_samples);
+        if(!ok){
+          std::lock_guard<std::mutex> lk(err_mu);
+          results[fi].ok=false;
+          results[fi].err = (err=="cancelled") ? "cancelled" : "decode: "+err;
+          continue;
+        }
+        // G13: count the full decoded duration of this file (incl. silence) for throughput.
+        decoded_samples += (long long)file_samples;
         log_info("切分完成: " + basename_utf8(inputs[fi]) + " (" + std::to_string(produced) + " 段)");  // C1: VAD done
         // R6: this file's production is complete only if we pushed every segment.
         { std::lock_guard<std::mutex> lk(err_mu); produced_complete[fi]=1; }
@@ -316,26 +314,16 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
       while((fi=next_file.fetch_add(1)) < (size_t)N){
         if(cancel && cancel->is_cancelled()) break;
         if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
-        AudioBuffer ab; std::string err;
+        std::string err;
         log_info("解码: " + basename_utf8(inputs[fi]));   // C1: decode begins
-        if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err, cancel)){
-          std::lock_guard<std::mutex> lk(err_mu);
-          results[fi].ok=false;
-          results[fi].err = (err=="cancelled") ? "cancelled" : "decode: "+err;
-          continue;
-        }
-        // G13: count the full decoded duration of this file (incl. silence) for throughput.
-        decoded_samples += (long long)ab.samples.size();
-        if(cancel && cancel->is_cancelled()){
-          std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="cancelled"; continue;
-        }
-        // P2: STREAM VAD segments to the shared queue as each is emitted so BOTH the
-        // CPU and GPU consumers start transcribing while VAD is still running on this
-        // file (kills the single-file decode+VAD dead-wait where both consumers idle).
-        // Per-segment bookkeeping is unchanged; only emission is incremental. push
-        // blocks on a full queue = backpressure; false from the callback stops on cancel.
+        // P3: STREAMING decode+VAD (see single path). ffmpeg's PCM is fed INCREMENTALLY
+        // into the VAD; each segment is pushed to the shared queue the instant it is found,
+        // so BOTH the CPU and GPU consumers start transcribing within seconds of a long
+        // file starting, with no whole-file memory spike. push blocks on a full queue =
+        // backpressure; false from the callback stops emission + terminates ffmpeg.
         long long produced = 0;
-        vad.segment_stream(ab, [&](SpeechSeg&& s) -> bool {
+        int64_t file_samples = 0;
+        bool ok = decode_vad_stream(cfg.ffmpeg_path, inputs[fi], vad, [&](SpeechSeg&& s) -> bool {
           if(cancel && cancel->is_cancelled()) return false;   // stop emitting on cancel
           seg_pending[fi].fetch_add(1);              // R6 fix: count before push
           segs_total.fetch_add(1);                   // segment-based progress: total grows as files are VADed
@@ -344,7 +332,15 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
           queue.push(std::move(st));                 // blocks if queue full (backpressure)
           ++produced;
           return true;
-        }, cancel);
+        }, err, cancel, &file_samples);
+        if(!ok){
+          std::lock_guard<std::mutex> lk(err_mu);
+          results[fi].ok=false;
+          results[fi].err = (err=="cancelled") ? "cancelled" : "decode: "+err;
+          continue;
+        }
+        // G13: count the full decoded duration of this file (incl. silence) for throughput.
+        decoded_samples += (long long)file_samples;
         log_info("切分完成: " + basename_utf8(inputs[fi]) + " (" + std::to_string(produced) + " 段)");  // C1: VAD done
         { std::lock_guard<std::mutex> lk(err_mu); produced_complete[fi]=1; }
       }
