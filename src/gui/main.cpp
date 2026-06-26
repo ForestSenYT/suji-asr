@@ -139,8 +139,8 @@ int main(int argc, char** argv)
             std::printf("started: provider=%s files=%d\n", p.toUtf8().constData(), n);
             std::fflush(stdout);
         });
-        QObject::connect(&w, &suji::EngineWorker::progress, [](int d, int t, double a) {
-            std::printf("progress: %d/%d audio=%.1f\n", d, t, a); std::fflush(stdout);
+        QObject::connect(&w, &suji::EngineWorker::progress, [](int d, int t, double a, double tot) {
+            std::printf("progress: %d/%d audio=%.1f total=%.1f\n", d, t, a, tot); std::fflush(stdout);
         });
         QObject::connect(&w, &suji::EngineWorker::fileResult, [](QString path, bool ok, int segs, QString err) {
             std::printf("fileResult: ok=%d segs=%d err=%s\n", ok, segs, err.toUtf8().constData());
@@ -181,14 +181,20 @@ int main(int argc, char** argv)
         QTimer poll;
         QObject::connect(&poll, &QTimer::timeout, [&]() {
             const QString rs = win.testRowStatus(0);
-            std::printf("[t=%2ds] row0=\"%s\"  status=\"%s\"\n",
+            std::printf("[t=%2ds] row0=\"%s\" prog=%d status=\"%s\"\n",
                         ticks, rs.toUtf8().constData(),
+                        win.testProgressValue(),
                         win.testStatusText().toUtf8().constData());
             std::fflush(stdout);
             ++ticks;
             const bool done = (rs == QString::fromUtf8("完成")
                             || rs == QString::fromUtf8("失败")
                             || rs == QString::fromUtf8("取消"));
+            if (done) {
+                std::printf("--- log panel ---\n%s\n--- end log ---\n",
+                    win.testLogText().toUtf8().constData());
+                std::fflush(stdout);
+            }
             if (done || ticks > 45) app.quit();
         });
         poll.start(1000);

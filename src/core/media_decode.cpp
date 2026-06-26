@@ -133,4 +133,76 @@ bool decode_to_pcm(const std::string& ffmpeg, const std::string& input,
     return true;
 }
 
+double probe_duration_seconds(const std::string& ffprobe, const std::string& input) {
+    std::wstring ffprobe_w = utf8_to_wide(ffprobe);
+    std::wstring input_w   = utf8_to_wide(input);
+
+    if (ffprobe_w.empty() || input_w.empty()) return -1.0;
+
+    std::wstring cmdline = L"\"" + ffprobe_w
+        + L"\" -v error -show_entries format=duration"
+        + L" -of default=noprint_wrappers=1:nokey=1 \""
+        + input_w + L"\"";
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength        = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE pipe_read  = INVALID_HANDLE_VALUE;
+    HANDLE pipe_write = INVALID_HANDLE_VALUE;
+    if (!CreatePipe(&pipe_read, &pipe_write, &sa, 0)) return -1.0;
+
+    if (!SetHandleInformation(pipe_read, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(pipe_read); CloseHandle(pipe_write);
+        return -1.0;
+    }
+
+    HANDLE nul_handle = CreateFileW(L"NUL", GENERIC_WRITE,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                    &sa, OPEN_EXISTING, 0, nullptr);
+    if (nul_handle == INVALID_HANDLE_VALUE) {
+        CloseHandle(pipe_read); CloseHandle(pipe_write);
+        return -1.0;
+    }
+
+    STARTUPINFOW si{};
+    si.cb         = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = nullptr;
+    si.hStdOutput = pipe_write;
+    si.hStdError  = nul_handle;
+
+    PROCESS_INFORMATION pi{};
+    BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr,
+                             TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(pipe_write);
+    CloseHandle(nul_handle);
+
+    if (!ok) { CloseHandle(pipe_read); return -1.0; }
+
+    // Read stdout text (the duration value)
+    std::string text;
+    std::vector<BYTE> chunk(256);
+    DWORD bytes_read = 0;
+    while (ReadFile(pipe_read, chunk.data(), static_cast<DWORD>(chunk.size()),
+                    &bytes_read, nullptr) && bytes_read > 0) {
+        text.append(reinterpret_cast<char*>(chunk.data()), bytes_read);
+    }
+    CloseHandle(pipe_read);
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    if (text.empty()) return -1.0;
+
+    try {
+        size_t pos = 0;
+        double d = std::stod(text, &pos);
+        return (pos > 0) ? d : -1.0;
+    } catch (...) {
+        return -1.0;
+    }
+}
+
 } // namespace suji

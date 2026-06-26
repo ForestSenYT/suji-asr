@@ -1,5 +1,6 @@
 #pragma once
 #include <QMainWindow>
+#include <QProgressBar>
 #include <QStringList>
 
 class QTableView;
@@ -43,6 +44,7 @@ public:
     QString testRowStatus(int row) const;     // current "状态" cell text
     QString testStatusText() const;           // bottom status label text
     QString testLogText() const;             // current log panel text
+    int testProgressValue() const { return m_progress ? m_progress->value() : -1; }
 
 public slots:
     void onAddFiles();
@@ -54,7 +56,7 @@ public slots:
 
     // Worker signal handlers
     void onWorkerStarted(QString provider, int filesTotal);
-    void onWorkerProgress(int filesDone, int filesTotal, double audioSec);
+    void onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec);
     void onWorkerFileResult(QString path, bool ok, int segments, QString err);
     void onWorkerFinished(int ok, int failed, int cancelled, double wallSec);
 

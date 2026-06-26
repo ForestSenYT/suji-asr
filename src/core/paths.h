@@ -12,6 +12,9 @@ std::string models_dir();
 /// app_dir()+"/ffmpeg.exe" if it exists, else SUJI_DEFAULT_FFMPEG (dev fallback).
 std::string ffmpeg_path();
 
+/// app_dir()+"/ffprobe.exe" if it exists, else same directory as SUJI_DEFAULT_FFMPEG with filename ffprobe.exe.
+std::string ffprobe_path();
+
 /// Dir containing the CUDA runtime DLLs, or "" if none found.
 /// app_dir() if cudnn64_9.dll is there; else SUJI_DEFAULT_CUDA_DLL_DIR if cudnn64_9.dll is there; else "".
 std::string cuda_dll_dir();

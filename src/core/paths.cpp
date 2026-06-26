@@ -54,6 +54,14 @@ std::string ffmpeg_path() {
     return SUJI_DEFAULT_FFMPEG;
 }
 
+std::string ffprobe_path() {
+    auto f = app_dir() + "/ffprobe.exe";
+    std::error_code ec;
+    if (std::filesystem::exists(f, ec)) return f;
+    // Dev fallback: same directory as SUJI_DEFAULT_FFMPEG, filename ffprobe.exe
+    return std::filesystem::path(SUJI_DEFAULT_FFMPEG).replace_filename("ffprobe.exe").string();
+}
+
 std::string cuda_dll_dir() {
     std::error_code ec;
     // 1. Check next to the running exe first (production install layout).

@@ -4,6 +4,7 @@
 #include "core/hardware.h"
 #include "core/config.h"
 #include "core/log.h"
+#include "core/media_decode.h"
 #include "core/output/writer_facade.h"
 #include "core/paths.h"
 
@@ -112,13 +113,21 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     // ------------------------------------------------------------------
     auto t0 = std::chrono::steady_clock::now();
 
+    // Probe total audio duration for determinate progress
+    double totalAudio = 0.0;
+    for (const std::string& f : vec) {
+        double d = probe_duration_seconds(ffprobe_path(), f);
+        if (d > 0.0) totalAudio += d;
+    }
+    log_info("total audio to transcribe: " + std::to_string(static_cast<int>(totalAudio)) + "s");
+
     emit started(QString::fromUtf8(provider_str(tune.provider)),
                  static_cast<int>(vec.size()));
 
     auto results = transcribe_batch_files(
         vec, c, tune,
-        [this](const BatchProgress& b) {
-            emit progress(b.files_done, b.files_total, b.audio_seconds_done);
+        [this, totalAudio](const BatchProgress& b) {
+            emit progress(b.files_done, b.files_total, b.audio_seconds_done, totalAudio);
         },
         &cancel_
     );

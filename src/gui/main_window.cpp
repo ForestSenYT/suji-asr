@@ -30,6 +30,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <chrono>
 
 namespace suji {
@@ -357,20 +358,26 @@ void MainWindow::onWorkerStarted(QString provider, int filesTotal)
         if (m_model->item(r, ColStatus)->text() == tr("待处理"))
             setRowStatus(r, tr("处理中"));
     }
-    // Indeterminate mode: min==max==0 makes Qt show a busy animation
-    m_progress->setRange(0, 0);
+    m_progress->setRange(0, 100);
+    m_progress->setValue(0);
 }
 
-void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec)
+void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec)
 {
     double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - m_startTime).count();
     double throughput = (elapsed > 0.0) ? (audioSec / elapsed) : 0.0;
 
-    setStatusText(tr("处理中 %1/%2  %3 倍速")
+    int pct = (totalAudioSec > 0.5)
+              ? std::min(99, static_cast<int>(100.0 * audioSec / totalAudioSec))
+              : 0;
+    m_progress->setValue(pct);
+
+    setStatusText(tr("处理中 %1/%2  %3 倍速  (已转写 %4 秒)")
         .arg(filesDone)
         .arg(filesTotal)
-        .arg(throughput, 0, 'f', 1));
+        .arg(throughput, 0, 'f', 1)
+        .arg(static_cast<int>(audioSec)));
 }
 
 void MainWindow::onWorkerFileResult(QString path, bool ok, int segments, QString err)

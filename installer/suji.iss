@@ -54,8 +54,9 @@ Source: "{#SrcRel}\*.dll"; DestDir: "{app}"; Flags: ignoreversion; Excludes: "on
 Source: "{#SrcRel}\platforms\*"; DestDir: "{app}\platforms"; Flags: ignoreversion recursesubdirs
 Source: "{#SrcRel}\styles\*";    DestDir: "{app}\styles";    Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SrcRel}\tls\*";       DestDir: "{app}\tls";       Flags: ignoreversion recursesubdirs createallsubdirs
-; --- ffmpeg (app_dir()/ffmpeg.exe) ---
-Source: "{#SrcVendor}\ffmpeg-master-latest-win64-lgpl\bin\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
+; --- ffmpeg + ffprobe (app_dir()/ffmpeg.exe, app_dir()/ffprobe.exe) ---
+Source: "{#SrcVendor}\ffmpeg-master-latest-win64-lgpl\bin\ffmpeg.exe";  DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SrcVendor}\ffmpeg-master-latest-win64-lgpl\bin\ffprobe.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; --- 模型 (app_dir()/models/...) ---
 Source: "{#SrcModels}\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; --- 文档 ---

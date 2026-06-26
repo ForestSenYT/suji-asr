@@ -19,7 +19,7 @@ public slots:
 
 signals:
     void started(QString provider, int filesTotal);
-    void progress(int filesDone, int filesTotal, double audioSec);
+    void progress(int filesDone, int filesTotal, double audioSec, double totalAudioSec);
     void fileResult(QString path, bool ok, int segments, QString err);
     void finished(int ok, int failed, int cancelled, double wallSec);
 
