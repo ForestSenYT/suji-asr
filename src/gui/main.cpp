@@ -10,8 +10,21 @@
 #include <cstdio>
 #include <string>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>
+
 int main(int argc, char** argv)
 {
+    // Windows: char** argv is ANSI-mangled for non-ASCII paths. Fetch the real
+    // UTF-16 command line so --selftest* can receive Chinese/Unicode file paths
+    // (the normal GUI gets paths from Qt as UTF-16, so it is unaffected).
+    int wargc = 0;
+    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    const QString selfArg2 = (wargv && wargc >= 3) ? QString::fromWCharArray(wargv[2])
+                           : (argc >= 3 ? selfArg2 : QString());
     // ------------------------------------------------------------------
     // Headless self-test: --selftest <wavfile>
     // Verifies the EngineWorker pipeline without a GUI / platform plugin.
@@ -35,7 +48,7 @@ int main(int argc, char** argv)
 
         QTimer::singleShot(0, [&]() {
             w.run(
-                QStringList{ QString::fromUtf8(argv[2]) },  // Fix 4: UTF-8 for consistency
+                QStringList{ selfArg2 },  // Fix 4: UTF-8 for consistency
                 QStringLiteral("build/gui_selftest"),
                 QStringLiteral("auto"),
                 true, true, true, true
@@ -77,7 +90,7 @@ int main(int argc, char** argv)
         );
 
         // Build a 6-file batch from the same wav — gives enough runtime to cancel
-        QString wavPath = QString::fromUtf8(argv[2]);
+        QString wavPath = selfArg2;
         QStringList inputs;
         for (int i = 0; i < 6; ++i)
             inputs << wavPath;
@@ -140,7 +153,7 @@ int main(int argc, char** argv)
             app.quit();
         });
         QMetaObject::invokeMethod(&w, "run", Qt::QueuedConnection,
-            Q_ARG(QStringList, QStringList{ QString::fromUtf8(argv[2]) }),
+            Q_ARG(QStringList, QStringList{ selfArg2 }),
             Q_ARG(QString, QStringLiteral("build/st_thread")),
             Q_ARG(QString, QStringLiteral("auto")),
             Q_ARG(bool, true), Q_ARG(bool, true), Q_ARG(bool, true), Q_ARG(bool, true));
@@ -161,7 +174,7 @@ int main(int argc, char** argv)
         suji::MainWindow win;
         win.show();
 
-        const QString file = QString::fromUtf8(argv[2]);
+        const QString file = selfArg2;
         QTimer::singleShot(0, [&win, file]() { win.testStart(file); });
 
         int ticks = 0;
