@@ -116,6 +116,7 @@ protected:
     void dropEvent(QDropEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;        // D: keep empty-state overlay centered
+    bool eventFilter(QObject* obj, QEvent* event) override;  // re-center hint on viewport's own resize
 
 private:
     void addInputFile(const QString& path);

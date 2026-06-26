@@ -283,6 +283,33 @@ int main(int argc, char** argv)
         return rc;
     }
 
+    // Offscreen screenshot of the EMPTY state (no rows) — verifies the centered hint.
+    if (argc >= 3 && std::string(argv[1]) == "--screenshot-empty") {
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+        QApplication app(argc, argv);
+        QApplication::setOrganizationName(QStringLiteral("suji"));
+        QApplication::setApplicationName(QStringLiteral("suji-asr"));
+        app.setStyle(QStringLiteral("Fusion"));
+        app.setStyleSheet(suji::MainWindow::themeStyleSheet());
+        app.setWindowIcon(suji::MainWindow::makeAppIcon());
+        const QString outPng = selfArg2;
+        suji::MainWindow win;
+        win.resize(1000, 660);
+        win.show();
+        int rc = 1;
+        QTimer::singleShot(300, [&]() {
+            QPixmap shot = win.grab();
+            rc = shot.save(outPng) ? 0 : 1;
+            std::printf("screenshot-empty: %s -> %s (%dx%d)\n",
+                        rc == 0 ? "ok" : "FAILED",
+                        outPng.toUtf8().constData(), shot.width(), shot.height());
+            std::fflush(stdout);
+            app.quit();
+        });
+        app.exec();
+        return rc;
+    }
+
     // ------------------------------------------------------------------
     // Normal GUI path
     // ------------------------------------------------------------------

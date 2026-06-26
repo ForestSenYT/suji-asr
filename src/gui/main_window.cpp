@@ -629,7 +629,11 @@ MainWindow::MainWindow(QWidget* parent)
     m_emptyHint->setObjectName(QStringLiteral("emptyHint"));
     m_emptyHint->setAlignment(Qt::AlignCenter);
     m_emptyHint->setAttribute(Qt::WA_TransparentForMouseEvents);  // clicks fall through to the table
-    m_emptyHint->setWordWrap(true);
+    m_emptyHint->setWordWrap(false);  // short one-line hint; wrapping fragmented it when mis-sized
+    m_emptyHint->adjustSize();
+    // The window resizeEvent fires before the table viewport has its final geometry,
+    // which left the hint stuck top-left. Re-center on the VIEWPORT's own resize.
+    m_table->viewport()->installEventFilter(this);
 
     // -----------------------------------------------------------------------
     // Log panel — splitter below the file table
@@ -1306,6 +1310,16 @@ void MainWindow::resizeEvent(QResizeEvent* event)
 {
     QMainWindow::resizeEvent(event);
     updateEmptyState();   // re-centers m_emptyHint over the current viewport
+}
+
+// The table viewport gets its real geometry AFTER the window resizeEvent fires, so
+// centering there used a stale rect (hint stuck top-left). Re-center on the
+// viewport's own resize for correct timing.
+bool MainWindow::eventFilter(QObject* obj, QEvent* event)
+{
+    if (m_table && obj == m_table->viewport() && event->type() == QEvent::Resize)
+        updateEmptyState();
+    return QMainWindow::eventFilter(obj, event);
 }
 
 // ---------------------------------------------------------------------------
