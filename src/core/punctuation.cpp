@@ -6,7 +6,7 @@ Punctuator::Punctuator(const EngineConfig& cfg) {
   if (cfg.punct_model.empty()) return;
   SherpaOnnxOfflinePunctuationConfig c; std::memset(&c, 0, sizeof(c));
   c.model.ct_transformer = cfg.punct_model.c_str();
-  c.model.num_threads = 1; c.model.provider = "cpu"; c.model.debug = 0;
+  c.model.num_threads = cfg.punct_threads; c.model.provider = cfg.punct_provider.c_str(); c.model.debug = 0;
   punct_ = SherpaOnnxCreateOfflinePunctuation(&c);
 }
 Punctuator::~Punctuator(){ if (punct_) SherpaOnnxDestroyOfflinePunctuation(punct_); }

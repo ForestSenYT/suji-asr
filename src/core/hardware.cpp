@@ -161,7 +161,16 @@ AutoTune decide(const HardwareInfo& hw, const EngineConfig& cfg){
     int by_ram      = hw.ram_free_mb > 0 ? hw.ram_free_mb / 2000 : 2;
     t.in_flight_files = std::max(2, std::min(8, by_ram));
   }
-  (void)cfg; // reserved for future override hooks
+  // T5: apply optional caps (0 = uncapped/auto)
+  if (cfg.max_batch   > 0) {
+    t.batch           = std::min(t.batch,           cfg.max_batch);
+    t.gpu_batch       = std::min(t.gpu_batch,       cfg.max_batch);
+    t.cpu_batch       = std::min(t.cpu_batch,       cfg.max_batch);
+  }
+  if (cfg.max_threads > 0) {
+    t.num_threads     = std::min(t.num_threads,     cfg.max_threads);
+    t.cpu_asr_threads = std::min(t.cpu_asr_threads, cfg.max_threads);
+  }
   return t;
 }
 }

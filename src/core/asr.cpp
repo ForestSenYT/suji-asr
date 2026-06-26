@@ -33,7 +33,7 @@ Asr::Asr(const EngineConfig& cfg) {
   c.model_config.num_threads = (cfg.provider == Provider::Cuda) ? 1 : cfg.num_threads;
   c.model_config.provider = provider_str(cfg.provider);
   c.model_config.debug = 0;
-  c.decoding_method = "greedy_search";
+  c.decoding_method = cfg.decoding_method.c_str();
   if (!cfg.rule_fsts.empty()) c.rule_fsts = cfg.rule_fsts.c_str();
   rec_ = SherpaOnnxCreateOfflineRecognizer(&c);
 }

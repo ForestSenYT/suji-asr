@@ -27,5 +27,15 @@ struct EngineConfig {
   std::string cuda_dll_dir;
   // 输出开关
   bool out_srt=true, out_vtt=true, out_json=true, out_md=true;
+  // T3: ASR 解码方法(默认 greedy_search)
+  std::string decoding_method = "greedy_search";
+  // G10: 标点模型 provider / 线程数
+  std::string punct_provider = "cpu";
+  int punct_threads = 1;
+  // T5: Auto-tuner caps (0 = uncapped/auto)
+  int max_batch = 0;
+  int max_threads = 0;
+  // G5: SRT/VTT 行宽(0=不换行; >0=按 UTF-8 码点数断行)
+  int srt_max_chars_per_line = 0;
 };
 }

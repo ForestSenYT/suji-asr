@@ -44,7 +44,7 @@ static int parse_positive_int(const char* s) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--in-flight N] [--cuda-dll-dir <path>] [--resume|--no-resume]");
+    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--in-flight N] [--cuda-dll-dir <path>] [--srt-line N] [--resume|--no-resume]");
     return 2;
   }
 
@@ -65,6 +65,7 @@ int main(int argc, char** argv) {
   int         finflight      = 0;
   std::string cuda_dll_dir_override;
   bool        resume         = true;
+  int         fsrt_line      = 0;
   std::vector<std::string> inputs;
 
   for (int i = 1; i < argc; ++i) {
@@ -88,6 +89,10 @@ int main(int argc, char** argv) {
       if (finflight == 0) { log_err("--in-flight requires a positive integer, got: " + std::string(argv[i])); return 2; }
     }
     else if (a == "--cuda-dll-dir" && i + 1 < argc) cuda_dll_dir_override = argv[++i];
+    else if (a == "--srt-line"      && i + 1 < argc) {
+      // 0 = no wrap (valid default); positive = max codepoints per line
+      fsrt_line = parse_positive_int(argv[++i]);
+    }
     else if (a == "--resume")     resume = true;
     else if (a == "--no-resume")  resume = false;
     else if (a.size() > 2 && a[0] == '-' && a[1] == '-') {
@@ -190,6 +195,8 @@ int main(int argc, char** argv) {
   // Apply final provider to engine config
   c.provider    = tune.provider;
   c.num_threads = tune.num_threads;
+  // G5: SRT/VTT line-wrap width (0 = no wrap, default)
+  if (fsrt_line > 0) c.srt_max_chars_per_line = fsrt_line;
 
   auto t0 = std::chrono::steady_clock::now();
   double last_audio = 0.0;

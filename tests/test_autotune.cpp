@@ -193,3 +193,53 @@ TEST_CASE("fill_hetero agrees with decide() on het path") {
   CHECK(from_fill.num_threads      == from_decide.num_threads);
   CHECK(from_fill.batch            == from_decide.batch);
 }
+
+// ---- T5: decide() optional max_batch / max_threads caps ----
+
+TEST_CASE("T5: max_batch=0 leaves batch unchanged (auto)") {
+  EngineConfig cfg;
+  cfg.max_batch = 0;
+  // GPU + 8 cores = Cuda path, batch >= 8
+  auto t = decide(hw(true, 6000, 8, 40000, true), cfg);
+  CHECK(t.batch >= 8);
+}
+
+TEST_CASE("T5: max_batch caps batch") {
+  EngineConfig cfg;
+  cfg.max_batch = 8;
+  // GPU + 8 cores = Cuda path; uncapped batch=(6000-1500)/150=30 -> capped to 8
+  auto t = decide(hw(true, 6000, 8, 40000, true), cfg);
+  CHECK(t.batch <= 8);
+}
+
+TEST_CASE("T5: max_batch caps gpu_batch") {
+  EngineConfig cfg;
+  cfg.max_batch = 9;
+  auto t = decide(hw(true, 6000, 8, 40000, true), cfg);
+  CHECK(t.gpu_batch <= 9);
+}
+
+TEST_CASE("T5: max_threads=0 leaves num_threads unchanged (auto)") {
+  EngineConfig cfg;
+  cfg.max_threads = 0;
+  // CPU path with 16 cores -> num_threads >= 16
+  auto t = decide(hw(false, 0, 16, 40000), cfg);
+  CHECK(t.num_threads >= 16);
+}
+
+TEST_CASE("T5: max_threads caps num_threads") {
+  EngineConfig cfg;
+  cfg.max_threads = 6;
+  // CPU path with 16 cores -> uncapped would be 16
+  auto t = decide(hw(false, 0, 16, 40000), cfg);
+  CHECK(t.num_threads <= 6);
+}
+
+TEST_CASE("T5: max_batch and max_threads both active") {
+  EngineConfig cfg;
+  cfg.max_batch = 4;
+  cfg.max_threads = 4;
+  auto t = decide(hw(false, 0, 16, 40000), cfg);
+  CHECK(t.batch <= 4);
+  CHECK(t.num_threads <= 4);
+}
