@@ -66,8 +66,11 @@ std::vector<AsrResult> Asr::transcribe_batch(const std::vector<SegView>& segs){
   for(auto& s : segs){
     const SherpaOnnxOfflineStream* st = SherpaOnnxCreateOfflineStream(rec_);
     if (!st) {
+      // R3: stream creation failed (e.g. VRAM pressure). Return an EMPTY vector
+      // (NOT a segs.size()-length all-empty one) so the caller's size-mismatch
+      // guard fires and the batch is treated as failed, never a silent empty result.
       for (auto* p : streams) SherpaOnnxDestroyOfflineStream(p);
-      return out;
+      return {};
     }
     SherpaOnnxAcceptWaveformOffline(st, 16000, s.samples, s.n);
     streams.push_back(st);
