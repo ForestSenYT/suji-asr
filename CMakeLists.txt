@@ -13,10 +13,11 @@ add_library(suji_core STATIC ${SUJI_CORE_SRC})
 target_include_directories(suji_core PUBLIC src third_party)
 target_link_libraries(suji_core PUBLIC sherpa_onnx_c)
 
-# 把模型/ffmpeg 路径作为编译期默认(测试/CLI 用)
+# 把模型/ffmpeg/cuda-dll 路径作为编译期默认(测试/CLI 用)
 target_compile_definitions(suji_core PUBLIC
   SUJI_DEFAULT_MODELS_DIR="${SUJI_MODELS_DIR}"
-  SUJI_DEFAULT_FFMPEG="${SUJI_FFMPEG}")
+  SUJI_DEFAULT_FFMPEG="${SUJI_FFMPEG}"
+  SUJI_DEFAULT_CUDA_DLL_DIR="${CMAKE_SOURCE_DIR}/vendor/cuda-redist/dll")
 
 # CLI
 add_executable(suji_cli src/cli/main.cpp)

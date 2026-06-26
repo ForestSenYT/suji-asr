@@ -16,3 +16,9 @@ TEST_CASE("models_dir falls back to dev default when no app-relative models/ exi
 TEST_CASE("ffmpeg_path falls back to dev default when no app-relative ffmpeg.exe exists") {
     CHECK(ffmpeg_path() == std::string(SUJI_DEFAULT_FFMPEG));
 }
+
+TEST_CASE("cuda_dll_dir falls back to dev default when cudnn64_9.dll is in vendor tree") {
+    // suji_tests.exe lives in build/Release with NO cudnn64_9.dll next to it,
+    // so cuda_dll_dir() falls through to SUJI_DEFAULT_CUDA_DLL_DIR (vendor/cuda-redist/dll).
+    CHECK(cuda_dll_dir() == std::string(SUJI_DEFAULT_CUDA_DLL_DIR));
+}

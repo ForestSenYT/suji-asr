@@ -54,4 +54,16 @@ std::string ffmpeg_path() {
     return SUJI_DEFAULT_FFMPEG;
 }
 
+std::string cuda_dll_dir() {
+    std::error_code ec;
+    // 1. Check next to the running exe first (production install layout).
+    auto app_candidate = app_dir() + "/cudnn64_9.dll";
+    if (std::filesystem::exists(app_candidate, ec)) return app_dir();
+    // 2. Fall back to the dev-tree vendor location.
+    auto dev_candidate = std::string(SUJI_DEFAULT_CUDA_DLL_DIR) + "/cudnn64_9.dll";
+    if (std::filesystem::exists(dev_candidate, ec)) return std::string(SUJI_DEFAULT_CUDA_DLL_DIR);
+    // 3. CUDA runtime DLLs not found.
+    return "";
+}
+
 } // namespace suji

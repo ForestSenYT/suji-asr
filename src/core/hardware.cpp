@@ -1,4 +1,5 @@
 #include "core/hardware.h"
+#include "core/paths.h"
 #include <cstdio>
 #include <thread>
 #include <string>
@@ -38,11 +39,13 @@ HardwareInfo probe_hardware(const std::string& nvidia_smi){
       try { h.gpu_total_mb=std::stoi(trim(tot)); h.gpu_free_mb=std::stoi(trim(fre)); h.gpu_name=trim(name); h.has_cuda_gpu = h.gpu_total_mb>0; } catch(...) {}
     }
   }
+  h.cuda_dll_dir = cuda_dll_dir();
+  h.cuda_runtime_available = !h.cuda_dll_dir.empty();
   return h;
 }
 AutoTune decide(const HardwareInfo& hw, const EngineConfig& cfg){
   AutoTune t;
-  bool use_gpu = hw.has_cuda_gpu && hw.gpu_free_mb >= 3000;
+  bool use_gpu = hw.has_cuda_gpu && hw.gpu_free_mb >= 3000 && hw.cuda_runtime_available;
   if(use_gpu){
     t.provider = Provider::Cuda;
     t.num_threads = 1;
