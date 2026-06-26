@@ -45,6 +45,7 @@ public:
     QString testStatusText() const;           // bottom status label text
     QString testLogText() const;             // current log panel text
     int testProgressValue() const { return m_progress ? m_progress->value() : -1; }
+    void testCancel();                        // invoke the real onCancel()
 
 public slots:
     void onAddFiles();

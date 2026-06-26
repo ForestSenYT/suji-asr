@@ -25,6 +25,7 @@ int main(int argc, char** argv)
     LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
     const QString selfArg2 = (wargv && wargc >= 3) ? QString::fromWCharArray(wargv[2])
                            : (argc >= 3 ? QString::fromUtf8(argv[2]) : QString());
+    const QString selfArg3 = (wargv && wargc >= 4) ? QString::fromWCharArray(wargv[3]) : QString();
     // ------------------------------------------------------------------
     // Headless self-test: --selftest <wavfile>
     // Verifies the EngineWorker pipeline without a GUI / platform plugin.
@@ -176,6 +177,15 @@ int main(int argc, char** argv)
 
         const QString file = selfArg2;
         QTimer::singleShot(0, [&win, file]() { win.testStart(file); });
+
+        // optional: --selftest-gui <file> <cancelSeconds> -> click Cancel mid-run
+        if (!selfArg3.isEmpty()) {
+            int cancelMs = int(selfArg3.toDouble() * 1000.0);
+            QTimer::singleShot(cancelMs, [&win]() {
+                std::printf(">>> Cancel clicked now\n"); std::fflush(stdout);
+                win.testCancel();
+            });
+        }
 
         int ticks = 0;
         QTimer poll;

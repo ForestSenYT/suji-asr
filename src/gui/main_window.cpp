@@ -578,6 +578,11 @@ QString MainWindow::testStatusText() const
     return m_statusLabel ? m_statusLabel->text() : QString();
 }
 
+void MainWindow::testCancel()
+{
+    onCancel();
+}
+
 QString MainWindow::testLogText() const
 {
     return m_log ? m_log->toPlainText() : QString();
