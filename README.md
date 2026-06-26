@@ -40,13 +40,14 @@ build\Release\suji_cli.exe "<讲课文件.mp4>" -o build\out
 **批量(目录或多个文件):**
 ```powershell
 build\Release\suji_batch.exe "<目录或多个文件>" -o build\out --provider auto
-# 选项: --provider auto|cpu|cuda  --batch N  --in-flight N  --cuda-dll-dir <CUDA DLL 目录>
-# auto: 自动探测;有可用 N 卡(且给了 --cuda-dll-dir)用 GPU,否则 CPU
+# 选项: --provider auto|cpu|cuda  --batch N  --in-flight N  --cuda-dll-dir <覆盖自动检测的 CUDA 目录>
+# auto: 自动探测;有可用 N 卡 + CUDA 运行时(自动检测,无需 --cuda-dll-dir)→ GPU,否则 CPU
 ```
 输出:`<out>/<输入名>.{srt,vtt,json,md}`(全 UTF-8 无 BOM)。
 
 ## GPU 说明(重要)
-- Windows 上,CUDA `CreateOfflineRecognizer` 在**缺 CUDA 运行时 DLL 时会硬崩**(不返回 null)。因此 `suji_batch` **只有显式 `--cuda-dll-dir <dir>`** 时才尝试 CUDA;否则 `auto`/`cuda` 安全回退 CPU。
+- **运行期自适应(`core/hardware.cpp`)**:`auto` 探测到可用 NVIDIA GPU **且** CUDA 运行时 DLL 存在(自动检测 exe 同目录的 `cudnn64_9.dll`,或开发机的 `vendor\cuda-redist\dll`)→ 走 GPU,否则 CPU,**无需任何 flag**。`--provider cpu|cuda` 覆盖选择,`--cuda-dll-dir` 覆盖 CUDA 目录。GUI 同样自适应。
+- **崩溃安全**:Windows 上 CUDA `CreateOfflineRecognizer` 缺 CUDA 运行时 DLL 时会硬崩(不返回 null)。`decide()` 仅在检测到 CUDA 运行时时才选 GPU,故缺 DLL 的机器自动走 CPU、绝不崩。安装包把 CUDA 运行时随 exe 一起装(见 `installer/`),部署机有 N 卡即自动用 GPU。
 - 开发机准备 GPU DLL:
   ```powershell
   python -m pip download --only-binary=:all: --dest vendor\cuda-redist `
@@ -55,7 +56,7 @@ build\Release\suji_batch.exe "<目录或多个文件>" -o build\out --provider a
   $env:PATH = "F:\Git\suji-asr\vendor\cuda-redist\dll;" + $env:PATH
   build\Release\suji_batch.exe "<目录>" -o build\out --provider cuda --cuda-dll-dir F:\Git\suji-asr\vendor\cuda-redist\dll
   ```
-- **吞吐**:GPU 的固定开销(CUDA/cuDNN 初始化 + 模型上显存,~20s)需**长音频**才摊薄;短小文件上 CPU 反而快。真实讲课(数十分钟到数小时)上 GPU 批量优势显现(见 benchmark)。
+- **吞吐(实测,见 `BENCHMARK.md`)**:在 dev 机(RTX 2080 + 5800X)上,本 **int8** 模型 **CPU 反而比 GPU 快 ~1.7×**(ORT 对 int8 的 CUDA 加速弱,int8 本是 CPU 优化);GPU 另有 ~20s 固定初始化开销。**部署机 3070 Ti(Ampere)上 GPU 是否更快需在该机 benchmark 确认**;程序会自适应,默认有 GPU 走 GPU,可 `--provider cpu` 覆盖。
 
 ## 已知限制 / 待办(详见 `PROGRESS.md`)
 - **ITN 默认关**:`--rule-fsts` 接线已就位,但未找到现成的中文 ITN FST(数字保留口语形式,如"二零二六");标点正常。待获取/构建 FST。
