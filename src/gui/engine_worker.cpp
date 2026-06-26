@@ -75,13 +75,27 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
 
     // Honor the UI provider combo: "auto" keeps decide()'s choice.
     std::string prov = provider.toStdString();
-    if      (prov == "cpu")  tune.provider = Provider::Cpu;
-    else if (prov == "cuda") tune.provider = Provider::Cuda;
+    if      (prov == "cpu")    tune.provider = Provider::Cpu;
+    else if (prov == "cuda")   tune.provider = Provider::Cuda;
+    else if (prov == "hetero") {
+        // Mirror batch_main.cpp H4 logic: validate hardware, fill tunables or fall back.
+        bool gpu_ok = hw.has_cuda_gpu && hw.gpu_free_mb >= 3000 && hw.cuda_runtime_available;
+        bool cpu_ok = hw.cpu_threads >= 12;
+        if (!(gpu_ok && cpu_ok)) {
+            log_info("hetero unavailable (need CUDA GPU + >=12 cores), falling back");
+            tune.provider = hw.has_cuda_gpu ? Provider::Cuda : Provider::Cpu;
+        } else {
+            fill_hetero(tune, hw);
+        }
+    }
 
-    // Crash-safe CUDA: only run on GPU when the CUDA DLL dir is known.
-    if (tune.provider == Provider::Cuda) {
-        c.cuda_dll_dir = hw.cuda_dll_dir;          // auto-detected path
-        if (c.cuda_dll_dir.empty()) { tune.provider = Provider::Cpu; }   // no CUDA runtime -> CPU
+    // Crash-safe CUDA/Hetero: only run on GPU when the CUDA DLL dir is known.
+    if (tune.provider == Provider::Cuda || tune.provider == Provider::Hetero) {
+        c.cuda_dll_dir = hw.cuda_dll_dir;
+        if (c.cuda_dll_dir.empty()) {
+            log_info("CUDA runtime not found, falling back to CPU");
+            tune.provider = Provider::Cpu;
+        }
     }
 
     // Recompute CPU tunables after any fallback.

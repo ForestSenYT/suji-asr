@@ -162,6 +162,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_provider->addItem(QStringLiteral("auto"));
     m_provider->addItem(QStringLiteral("cpu"));
     m_provider->addItem(QStringLiteral("cuda"));
+    m_provider->addItem(QStringLiteral("hetero"));
 
     m_chkSrt  = new QCheckBox(QStringLiteral("SRT"),  bottomWidget);
     m_chkVtt  = new QCheckBox(QStringLiteral("VTT"),  bottomWidget);
