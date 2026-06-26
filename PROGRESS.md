@@ -185,4 +185,12 @@ T2 nvidia-smi→CreateProcessW、T3 decoding_method 可配、T5 max_batch/max_th
 **决策(自主)**:用户主场景=单个多小时文件,正是 +19% 命中处;−3.5% 只在多短文件(非其场景)。→ **重做:分桶仅 `nfiles==1` 启用**,`nfiles>1` 与 main 逐字节同路径(不回退);门控=输入数算一次的确定式 bool。回退:删门控。**[后台 agent 重做+实测中]**
 
 ### 3. 安装包 0.6 重建(就绪,待 P5 落定后构建)
-fp16-AED(2.2GB)已在 `models/`,`.iss` 第61行 `models\*` 递归 → 自动打包。版本 0.5→0.6 + 更新体积注释(模型~3.0GB int8+fp16 + CUDA2.4GB,压缩后约 2.5–3.5GB,提交 `<.iss>`)。ISCC 已装。待 P5 合并后跑 `scripts\build_installer.ps1` 打包含流式解码+P5门控的最新 exe。
+fp16-AED(2.2GB)已在 `models/`,`.iss` 第61行 `models\*` 递归 → 自动打包。版本 0.5→0.6 + 更新体积注释。ISCC 已装。
+
+### 4. ⭐ 最终对抗式 QA(ultracode workflow,6 agent)+ 修复(打包前)
+打包前跑了一轮对抗式 QA(4 路并行审计:流式/P5/安装包完整性/GUI + 真机功能冒烟 + 完整性裁决),**抓到 2 个会让安装包在干净 3070Ti 机上直接坏掉的 Critical**,验证后修复:
+- **C1 — VC++ 运行时未打包**:三个 exe + `onnxruntime_providers_cuda.dll` 硬依赖 MSVCP140/VCRUNTIME140[_1](dumpbin 实证),`build\Release` 里没有、`.iss` 也没打包 → 干净机(无 VC++ Redist)**起不来、CUDA EP 也加载失败**;dev 机能跑只因 System32 有(0.5 的"干净目录测试"也在 dev 机,故漏)。**修**(`build_installer.ps1`):2c 从 VS `Microsoft.VC*.CRT` 拷 VC 运行时 DLL 进 `build\Release`(再被 `.iss *.dll` glob 收进包)+ 2d 关键 DLL 齐全断言(缺则中止,Rule 12 显式失败)。
+- **C2 — P5 N==1 门控从未进生产代码**:`cd4a069` 号称门控,**实际只加了自包含 mock 测试**(自带 std::queue、从不调真引擎),生产 `batch_engine.cpp` 仍**无条件 hold+sort**(对所有 N)→ 多文件 −3.5% 回归是活的。**Rule 9/12 违例(绿测试掩盖缺失功能),被 QA 抓到。** **修**(强模型实现+对抗评审 APPROVE,合 main `c40d2b0`):抽 `src/core/batch_form.h::form_next_batch(bucket,…)`,两消费者 `const bool bucket=(N==1)`;`bucket=false`(N>1)= 与 `71ce21a` 逐字节相同 FIFO 快路径;`bucket=true`(N==1)= hold+sort。`broke_on_cancel`:干净 EOF 必 flush、仅真取消才弃。删 mock,换**驱动生产 helper 的真测试**(去门控即失败,已验证)。顺带修俩流式 minor(`vad.finish` 尊重 drain bool、`decode_vad_stream` 早停写 total_samples)。**实测**(2080,3 趟 AB):bench10 N==1 **+16%(6.6→7.7×)** 保住;bench_multi N=6 **回到持平(回归消除,分工 69/30)**。188 测试绿,0 警告。
+- **Important**:`.iss` 补打 Qt `imageformats/iconengines/generic/networkinformation` 插件目录(原只有 platforms/styles/tls)。
+- **安装包 0.6 构建中**(后台 `build_installer.ps1`):两模型 + CUDA + VC 运行时 + Qt + ffmpeg。验收待:dumpbin 确认打包 exe 从 {app} 解析 VC 运行时 + 静默装干净目录跑通。
+- Minor(记录,关键已修)+ NEEDS-HUMAN:真 3070Ti benchmark、干净机装一次、push、模型/CUDA/VC 运行时许可证。详见 `.superpowers/sdd/` 报告。
