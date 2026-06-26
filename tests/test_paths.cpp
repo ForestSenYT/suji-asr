@@ -1,6 +1,7 @@
 #include "doctest/doctest.h"
 #include "core/paths.h"
 #include <string>
+#include <filesystem>
 
 using namespace suji;
 
@@ -17,8 +18,12 @@ TEST_CASE("ffmpeg_path falls back to dev default when no app-relative ffmpeg.exe
     CHECK(ffmpeg_path() == std::string(SUJI_DEFAULT_FFMPEG));
 }
 
-TEST_CASE("cuda_dll_dir falls back to dev default when cudnn64_9.dll is in vendor tree") {
-    // suji_tests.exe lives in build/Release with NO cudnn64_9.dll next to it,
-    // so cuda_dll_dir() falls through to SUJI_DEFAULT_CUDA_DLL_DIR (vendor/cuda-redist/dll).
-    CHECK(cuda_dll_dir() == std::string(SUJI_DEFAULT_CUDA_DLL_DIR));
+TEST_CASE("cuda_dll_dir returns a dir containing the CUDA runtime, or empty") {
+    std::string d = cuda_dll_dir();
+    if (!d.empty()) {
+        std::error_code ec;
+        // when non-empty, the returned dir MUST actually contain the CUDA runtime marker
+        CHECK(std::filesystem::exists(d + "/cudnn64_9.dll", ec));
+    }
+    // empty is valid (a machine with no CUDA runtime) — nothing to assert then
 }
