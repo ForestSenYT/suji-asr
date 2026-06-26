@@ -1,5 +1,6 @@
 #include "gui/main_window.h"
 #include "gui/engine_worker.h"
+#include "core/log.h"
 
 #include <QAction>
 #include <QCheckBox>
@@ -10,13 +11,17 @@
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QMetaObject>
 #include <QMimeData>
+#include <QPlainTextEdit>
+#include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSplitter>
 #include <QStandardItemModel>
 #include <QTableView>
 #include <QThread>
@@ -120,7 +125,24 @@ MainWindow::MainWindow(QWidget* parent)
     m_table->setColumnWidth(ColErr,    200);
     m_table->verticalHeader()->setVisible(false);
 
-    rootLayout->addWidget(m_table, /*stretch=*/1);
+    // -----------------------------------------------------------------------
+    // Log panel — splitter below the file table
+    // -----------------------------------------------------------------------
+    auto* splitter = new QSplitter(Qt::Vertical, central);
+
+    m_log = new QPlainTextEdit(splitter);
+    m_log->setReadOnly(true);
+    m_log->setMaximumBlockCount(5000);
+    QFont mono(QStringLiteral("Consolas"), 9);
+    mono.setStyleHint(QFont::Monospace);
+    m_log->setFont(mono);
+    m_log->setPlaceholderText(tr("日志…"));
+
+    splitter->addWidget(m_table);
+    splitter->addWidget(m_log);
+    splitter->setSizes({400, 180});
+
+    rootLayout->addWidget(splitter, /*stretch=*/1);
 
     // -----------------------------------------------------------------------
     // Bottom panel
@@ -210,6 +232,15 @@ MainWindow::MainWindow(QWidget* parent)
             worker_,       &QObject::deleteLater);
 
     workerThread_->start();
+
+    // Route core log_info/log_err -> GUI log panel (thread-safe via queued connection)
+    QPointer<MainWindow> self(this);
+    set_log_sink([self](const std::string& lvl, const std::string& m) {
+        if (!self) return;
+        QMetaObject::invokeMethod(self, "appendLogLine", Qt::QueuedConnection,
+            Q_ARG(QString, QString::fromStdString(lvl)),
+            Q_ARG(QString, QString::fromUtf8(m.c_str())));
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +248,7 @@ MainWindow::MainWindow(QWidget* parent)
 // ---------------------------------------------------------------------------
 MainWindow::~MainWindow()
 {
+    set_log_sink({});   // clear before worker teardown to avoid dangling callback
     workerThread_->quit();
     workerThread_->wait();
 }
@@ -350,11 +382,17 @@ void MainWindow::onWorkerFileResult(QString path, bool ok, int segments, QString
             if (ok) {
                 setRowStatus(r, tr("完成"));
                 setRowSegments(r, segments);
+                appendLogLine(QStringLiteral("OK"),
+                    tr("完成: %1 (%2 段)").arg(QFileInfo(path).fileName()).arg(segments));
             } else if (err == QStringLiteral("cancelled")) {
                 setRowStatus(r, tr("取消"));
+                appendLogLine(QStringLiteral("INFO"),
+                    tr("取消: %1").arg(QFileInfo(path).fileName()));
             } else {
                 setRowStatus(r, tr("失败"));
                 setRowError(r, err);
+                appendLogLine(QStringLiteral("ERR"),
+                    tr("失败: %1 — %2").arg(QFileInfo(path).fileName(), err));
             }
             return;
         }
@@ -521,6 +559,20 @@ QString MainWindow::testRowStatus(int row) const
 QString MainWindow::testStatusText() const
 {
     return m_statusLabel ? m_statusLabel->text() : QString();
+}
+
+QString MainWindow::testLogText() const
+{
+    return m_log ? m_log->toPlainText() : QString();
+}
+
+// ---------------------------------------------------------------------------
+// Log panel slot
+// ---------------------------------------------------------------------------
+void MainWindow::appendLogLine(QString level, QString msg)
+{
+    if (!m_log) return;
+    m_log->appendPlainText(QStringLiteral("[%1] %2").arg(level, msg));
 }
 
 } // namespace suji

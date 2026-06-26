@@ -10,6 +10,7 @@ class QComboBox;
 class QCheckBox;
 class QPushButton;
 class QThread;
+class QPlainTextEdit;
 
 namespace suji {
 
@@ -41,6 +42,7 @@ public:
     void testStart(const QString& file);     // addInputFile + onStart
     QString testRowStatus(int row) const;     // current "状态" cell text
     QString testStatusText() const;           // bottom status label text
+    QString testLogText() const;             // current log panel text
 
 public slots:
     void onAddFiles();
@@ -56,6 +58,8 @@ public slots:
     void onWorkerFileResult(QString path, bool ok, int segments, QString err);
     void onWorkerFinished(int ok, int failed, int cancelled, double wallSec);
 
+    void appendLogLine(QString level, QString msg);
+
 protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
@@ -68,6 +72,7 @@ private:
 
     // Widgets
     QTableView*         m_table       = nullptr;
+    QPlainTextEdit*     m_log         = nullptr;
     QStandardItemModel* m_model       = nullptr;
     QProgressBar*       m_progress    = nullptr;
     QLabel*             m_statusLabel = nullptr;
