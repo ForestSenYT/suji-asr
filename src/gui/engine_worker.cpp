@@ -8,17 +8,27 @@
 #include "core/output/writer_facade.h"
 #include "core/paths.h"
 #include "core/resume.h"
+#include "core/utf8_file.h"
 
 #include <QDir>
+#include <QStandardPaths>
 #include <QString>
 #include <QStringList>
 
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace suji {
 
@@ -45,14 +55,53 @@ static std::string parent_dir(const std::string& p) {
     return (slash == std::string::npos) ? std::string(".") : p.substr(0, slash);
 }
 
-// Resolve the output base (path without extension) for one input file.
-// outDirStd empty  -> next to the SOURCE file: parent_dir(input)/stem(input)
-//                     (matches the "（与源文件相同）" toolbar label).
-// outDirStd set    -> the chosen dir: outDirStd/stem(input) (unchanged behaviour).
-static std::string resolve_base(const std::string& input, const std::string& outDirStd) {
-    if (outDirStd.empty())
-        return parent_dir(input) + "/" + stem(input);
-    return outDirStd + "/" + stem(input);
+// Check whether a directory is writable: create it (noop if it exists; fails if
+// a file component blocks the path), then create+delete a tiny probe file.
+// UTF-8-safe: uses write_utf8_no_bom (wide API on Windows) + wide DeleteFileW.
+static bool dir_is_writable(const std::string& dir_utf8) {
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::u8path(dir_utf8), ec);
+    if (ec) return false;
+
+    std::string probe = dir_utf8 + "/.suji_writable_probe";
+    if (!suji::write_utf8_no_bom(probe, "")) return false;
+
+#ifdef _WIN32
+    {
+        int n = MultiByteToWideChar(CP_UTF8, 0, probe.data(), (int)probe.size(), nullptr, 0);
+        std::wstring w(static_cast<size_t>(n), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, probe.data(), (int)probe.size(), w.data(), n);
+        DeleteFileW(w.c_str());
+    }
+#else
+    std::remove(probe.c_str());
+#endif
+    return true;
+}
+
+// Return the effective output directory for desired_dir, falling back to
+// fallback_dir when desired_dir is not writable.  Result is cached in
+// dir_cache (keyed by desired_dir) so each distinct dir is probed once per
+// batch and the redirect log fires once per dir.
+static std::string effective_dir_cached(const std::string& desired_dir,
+                                        const std::string& fallback_dir,
+                                        std::map<std::string, std::string>& dir_cache)
+{
+    auto it = dir_cache.find(desired_dir);
+    if (it != dir_cache.end()) return it->second;
+
+    std::string effective;
+    if (dir_is_writable(desired_dir)) {
+        effective = desired_dir;
+    } else {
+        // Ensure fallback exists, then redirect.
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::u8path(fallback_dir), ec);
+        log_info(u8"源目录不可写(" + desired_dir + u8"/) — 已改存到 " + fallback_dir + "/");
+        effective = fallback_dir;
+    }
+    dir_cache[desired_dir] = effective;
+    return effective;
 }
 } // namespace
 
@@ -180,6 +229,20 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
         std::filesystem::create_directories(outDirStd);
     }
 
+    // Fallback output directory: Documents/suji-转写 (guaranteed writable even
+    // when the source dir is read-protected, e.g. Program Files).
+    const std::string fallback_dir = []() -> std::string {
+        QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+        if (docs.isEmpty())
+            docs = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+        docs += u8"/suji-\xe8\xbd\xac\xe5\x86\x99";  // /suji-转写
+        QDir().mkpath(docs);
+        return docs.toUtf8().constData();
+    }();
+    // Per-batch dir writability cache: desired_dir -> effective_dir.
+    // Avoids probing the same dir twice and logs the redirect only once per dir.
+    std::map<std::string, std::string> dir_cache;
+
     // ------------------------------------------------------------------
     // G7: Resume partition — skip files whose outputs are already complete.
     // Mirrors suji_batch's resume logic in batch_main.cpp.
@@ -190,7 +253,11 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     // skipped_inputs preserves order so we can emit fileResult for them later
     std::vector<std::string> skipped_inputs;
     for (const std::string& f : vec) {
-        std::string base_candidate = resolve_base(f, outDirStd);
+        // Desired dir: next-to-source (empty outDirStd) or user-chosen dir.
+        // effective_dir_cached falls back to Documents/suji-转写 if not writable.
+        std::string desired_dir = outDirStd.empty() ? parent_dir(f) : outDirStd;
+        std::string eff_dir     = effective_dir_cached(desired_dir, fallback_dir, dir_cache);
+        std::string base_candidate = eff_dir + "/" + stem(f);
         // Compute the unique base for this file (G6 dedup across the whole batch).
         std::string base = base_candidate;
         int n = 2;
@@ -264,7 +331,10 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
             // G6: deduplicate output base when two inputs share the same filename.
             // used_bases was pre-seeded during resume partition, so collisions are
             // detected even between todo-batch outputs and resumed-file bases.
-            std::string base_candidate = resolve_base(r.input, outDirStd);
+            // effective_dir_cached is already warm from the resume partition loop.
+            std::string desired_dir    = outDirStd.empty() ? parent_dir(r.input) : outDirStd;
+            std::string eff_dir        = effective_dir_cached(desired_dir, fallback_dir, dir_cache);
+            std::string base_candidate = eff_dir + "/" + stem(r.input);
             std::string base = base_candidate;
             int nn = 2;
             while (used_bases.count(base)) { base = base_candidate + "_" + std::to_string(nn++); }
