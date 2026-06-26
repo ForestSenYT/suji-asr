@@ -29,6 +29,8 @@
 - **R5 闸门**:3.9/3.4 = 1.147×,几乎贴着 1.15× 门槛——2080 上 GPU 对 int8 弱,异构收益偏小但为正。
 - 短文件(60s)启动开销占比大致 CPU 实测仅 3.4×(< 长音频 4.95×);长讲座(数十分钟)三者都更高,异构 margin 预期更稳。
 - **3070 Ti(NEEDS-HUMAN)**:Ampere int8 张量核更强 → GPU 半边贡献更大,异构 margin 预期明显更高;fp16 模型更甚。请在该机跑 `--provider cpu|cuda|hetero` 三测确认。
+- **非确定性(H7)**:hetero 因 (a) 每个 segment 归 CPU 还是 GPU 随运行时序变化 +(b)CPU 与 CUDA EP 对同一 int8 模型的数值差异,token 级 **run-to-run 不完全一致**(比单引擎的 batch-not-bit-exact 更甚)。要可复现的结果请用 `--provider cpu`(或 `cuda`)。`--resume` 不受影响(只查输出文件存在性,不比对内容)。
+- **可观测性(H9)**:hetero 跑完日志打印 `hetero split: CPU x% / GPU y%`(CLI stderr + GUI 日志面板可见),便于看两半边的实际分工。
 
 ## NEEDS-HUMAN(方向性,留给你定)
 1. **是否为 GPU 投入 fp16 模型?** 鉴于 CPU 已 5× 碾压豆包,**大概率不必**(投入产出低)。若要,需找/转 FireRedASR 的 fp16 ONNX。
