@@ -95,6 +95,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
         if(cancel && cancel->is_cancelled()) break;   // stop taking new files on cancel
         if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
         AudioBuffer ab; std::string err;
+        log_info("解码: " + inputs[fi]);   // G14: phase visibility — decode begins (silent window before)
         if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err, cancel)){
           std::lock_guard<std::mutex> lk(err_mu);
           results[fi].ok=false;
@@ -108,6 +109,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
           std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="cancelled"; continue;
         }
         auto segs = vad.segment(ab, cancel);
+        log_info("切分语音: " + inputs[fi] + " (" + std::to_string(segs.size()) + " 段)");  // G14: VAD done
         for(auto& s : segs){
           seg_pending[fi].fetch_add(1);              // R6 fix: count before push
           SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples);
@@ -256,6 +258,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
         if(cancel && cancel->is_cancelled()) break;
         if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
         AudioBuffer ab; std::string err;
+        log_info("解码: " + inputs[fi]);   // G14: phase visibility — decode begins (silent window before)
         if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err, cancel)){
           std::lock_guard<std::mutex> lk(err_mu);
           results[fi].ok=false;
@@ -268,6 +271,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
           std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="cancelled"; continue;
         }
         auto segs = vad.segment(ab, cancel);
+        log_info("切分语音: " + inputs[fi] + " (" + std::to_string(segs.size()) + " 段)");  // G14: VAD done
         for(auto& s : segs){
           seg_pending[fi].fetch_add(1);              // R6 fix: count before push
           SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples);
@@ -317,6 +321,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
           BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
           bp.audio_seconds_done=(double)samples_done.load()/16000.0;
           bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
+          bp.cpu_segs=cpu_segs.load(); bp.gpu_segs=gpu_segs.load();   // G14: live split
           cb(bp);
         }
         cb_lock.store(false);
@@ -368,7 +373,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
       results[i].transcript = std::move(tr);
     }
     files_done++;
-    if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; bp.total_audio_decoded=(double)decoded_samples.load()/16000.0; cb(bp); }
+    if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; bp.total_audio_decoded=(double)decoded_samples.load()/16000.0; bp.cpu_segs=cpu_segs.load(); bp.gpu_segs=gpu_segs.load(); cb(bp); }
   }
   return results;
 }
