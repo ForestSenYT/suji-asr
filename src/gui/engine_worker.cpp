@@ -116,6 +116,7 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     // Probe total audio duration for determinate progress
     double totalAudio = 0.0;
     for (const std::string& f : vec) {
+        if (cancel_.is_cancelled()) break;   // abort probing fast on cancel
         double d = probe_duration_seconds(ffprobe_path(), f);
         if (d > 0.0) totalAudio += d;
     }

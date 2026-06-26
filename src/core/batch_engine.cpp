@@ -43,13 +43,19 @@ std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& i
       while((fi=next_file.fetch_add(1)) < (size_t)N){
         if(cancel && cancel->is_cancelled()) break;   // stop taking new files on cancel
         AudioBuffer ab; std::string err;
-        if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err)){
-          { std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="decode: "+err; }
+        if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err, cancel)){
+          std::lock_guard<std::mutex> lk(err_mu);
+          results[fi].ok=false;
+          results[fi].err = (err=="cancelled") ? "cancelled" : "decode: "+err;
           continue;
+        }
+        // A just-decoded file must not enter VAD if cancel landed during decode.
+        if(cancel && cancel->is_cancelled()){
+          std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="cancelled"; continue;
         }
         Vad vad(cfg);
         if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
-        auto segs = vad.segment(ab);
+        auto segs = vad.segment(ab, cancel);
         for(auto& s : segs){ SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples); queue.push(std::move(st)); }
       }
     });
