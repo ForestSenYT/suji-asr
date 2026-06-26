@@ -12,6 +12,11 @@ inline const char* provider_str(Provider p){
 struct EngineConfig {
   std::string ffmpeg_path;     // ffmpeg.exe
   std::string asr_model;       // FireRedASR2-CTC model.int8.onnx
+  // P1: FireRedASR v1 AED (attention encoder-decoder). If BOTH non-empty,
+  // asr.cpp uses the fire_red_asr (encoder+decoder) config and ignores asr_model;
+  // otherwise it falls back to the fire_red_asr_ctc (single model) path.
+  std::string asr_encoder;     // AED encoder.onnx (e.g. encoder.fp16.onnx)
+  std::string asr_decoder;     // AED decoder.onnx (e.g. decoder.fp16.onnx)
   std::string tokens;          // tokens.txt
   std::string vad_model;       // silero_vad.onnx
   std::string punct_model;     // CT punct model.int8.onnx

@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
   SetConsoleCP(CP_UTF8);
 #endif
   if (argc < 2) {
-    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--cpu-threads N] [--in-flight N] [--cuda-dll-dir <path>] [--srt-line N] [--resume|--no-resume]");
+    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--cpu-threads N] [--in-flight N] [--cuda-dll-dir <path>] [--asr-encoder <path> --asr-decoder <path> [--asr-tokens <path>]] [--srt-line N] [--resume|--no-resume]");
     return 2;
   }
 
@@ -80,6 +80,9 @@ int main(int argc, char** argv) {
   std::string cuda_dll_dir_override;
   bool        resume         = true;
   int         fsrt_line      = 0;
+  // P1: FireRedASR AED model overrides (encoder+decoder+tokens). When both
+  // encoder and decoder are given, the engine uses the AED path (fire_red_asr).
+  std::string aed_encoder, aed_decoder, aed_tokens;
   std::vector<std::string> inputs;
 
   for (int i = 1; i < argc; ++i) {
@@ -107,6 +110,18 @@ int main(int argc, char** argv) {
       if (finflight == 0) { log_err("--in-flight requires a positive integer, got: " + std::string(argv[i])); return 2; }
     }
     else if (a == "--cuda-dll-dir" && i + 1 < argc) cuda_dll_dir_override = argv[++i];
+    else if (a == "--asr-encoder"  && i + 1 < argc) {
+      aed_encoder = argv[++i];
+      if (!fs::exists(aed_encoder)) { log_err("--asr-encoder file not found: " + aed_encoder); return 2; }
+    }
+    else if (a == "--asr-decoder"  && i + 1 < argc) {
+      aed_decoder = argv[++i];
+      if (!fs::exists(aed_decoder)) { log_err("--asr-decoder file not found: " + aed_decoder); return 2; }
+    }
+    else if (a == "--asr-tokens"   && i + 1 < argc) {
+      aed_tokens = argv[++i];
+      if (!fs::exists(aed_tokens)) { log_err("--asr-tokens file not found: " + aed_tokens); return 2; }
+    }
     else if (a == "--srt-line"      && i + 1 < argc) {
       // 0 = no wrap (valid default); positive = max codepoints per line
       fsrt_line = parse_positive_int(argv[++i]);
@@ -129,6 +144,21 @@ int main(int argc, char** argv) {
   }
 
   if (inputs.empty()) { log_err("no input media files"); return 1; }
+
+  // P1: apply FireRedASR AED overrides. Encoder+decoder must be given together
+  // (the engine only takes the AED path when BOTH are non-empty). Point tokens at
+  // the AED model's tokens.txt; without it the CTC tokens would mismatch the AED vocab.
+  if (aed_encoder.empty() != aed_decoder.empty()) {
+    log_err("--asr-encoder and --asr-decoder must be given together");
+    return 2;
+  }
+  if (!aed_encoder.empty()) {
+    c.asr_encoder = aed_encoder;
+    c.asr_decoder = aed_decoder;
+    if (!aed_tokens.empty()) c.tokens = aed_tokens;
+    log_info("asr: FireRedASR AED (encoder+decoder) selected");
+  }
+  if (!aed_tokens.empty() && aed_encoder.empty()) c.tokens = aed_tokens;
 
   // Resume partition: skip already-complete outputs
   std::vector<std::string> todo;

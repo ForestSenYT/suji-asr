@@ -28,7 +28,17 @@ Asr::Asr(const EngineConfig& cfg) {
   SherpaOnnxOfflineRecognizerConfig c; std::memset(&c, 0, sizeof(c));
   c.feat_config.sample_rate = 16000;
   c.feat_config.feature_dim = 80;
-  c.model_config.fire_red_asr_ctc.model = cfg.asr_model.c_str();
+  // P1: select AED (encoder/decoder) vs CTC (single model). When both AED paths
+  // are set, use fire_red_asr + model_type="fire_red_asr"; otherwise keep the
+  // default CTC path (model_type left unset so sherpa auto-detects fire_red_asr_ctc).
+  const bool use_aed = !cfg.asr_encoder.empty() && !cfg.asr_decoder.empty();
+  if (use_aed) {
+    c.model_config.fire_red_asr.encoder = cfg.asr_encoder.c_str();
+    c.model_config.fire_red_asr.decoder = cfg.asr_decoder.c_str();
+    c.model_config.model_type = "fire_red_asr";
+  } else {
+    c.model_config.fire_red_asr_ctc.model = cfg.asr_model.c_str();
+  }
   c.model_config.tokens = cfg.tokens.c_str();
   c.model_config.num_threads = (cfg.provider == Provider::Cuda) ? 1 : cfg.num_threads;
   c.model_config.provider = provider_str(cfg.provider);
