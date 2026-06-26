@@ -36,8 +36,11 @@ static std::string wrap_codepoints(const std::string& text, int max_codepoints) 
     bool is_break_char = (cp_len == 1 && (*p == ' ' || *p == '\n'));
 
     if (line_cp >= max_codepoints) {
-      // Hard-break before this codepoint
+      // Hard-break before this codepoint; skip leading ASCII spaces on new line
       flush_line(p, true);
+      while (p < end && *p == ' ') { ++p; }
+      line_start = p;
+      continue;
     } else if (line_cp > 0 && line_cp >= max_codepoints - 2 && is_break_char) {
       // Natural break within 2 chars of limit — use it, consume the break char
       flush_line(p, true);

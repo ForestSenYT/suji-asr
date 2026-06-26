@@ -1,6 +1,7 @@
 #include "doctest/doctest.h"
 #include "core/output/srt_writer.h"
 #include "core/config.h"
+#include <sstream>
 using namespace suji;
 
 TEST_CASE("srt basic") {
@@ -40,6 +41,46 @@ TEST_CASE("G5: srt max=6 wraps 10-char zh string into lines <=6 codepoints") {
   int cp = 0;
   for (unsigned char b : line1) if ((b & 0xC0u) != 0x80u) ++cp;
   CHECK(cp <= 6);
+}
+
+TEST_CASE("G5: srt no leading space on wrapped continuation lines") {
+  // "hello world foo" with max=8: hard-break fires at 8 -> next line must not start with space
+  Transcript t; Segment s; s.start=0.0; s.end=1.0;
+  s.text = "hello wo rld";  // 12 chars; max=8 -> break at 8 leaving " rld" -> trim -> "rld"
+  t.segments={s};
+  EngineConfig cfg; cfg.srt_max_chars_per_line = 8;
+  std::string srt = to_srt(t, cfg);
+  // Find cue body after timecode line
+  auto tpos = srt.find("00:00:00,000 --> 00:00:01,000\n");
+  REQUIRE(tpos != std::string::npos);
+  std::string body = srt.substr(tpos + 30);
+  // Lines are split by '\n'; no line should start with a space
+  std::string line;
+  std::istringstream ss(body);
+  bool any_leading_space = false;
+  while (std::getline(ss, line)) {
+    if (!line.empty() && line[0] == ' ') any_leading_space = true;
+  }
+  CHECK_FALSE(any_leading_space);
+}
+
+TEST_CASE("G5: srt CJK-only string unaffected by space-trim (no spaces to trim)") {
+  Transcript t; Segment s; s.start=0.0; s.end=1.0;
+  s.text = u8"一二三四五六七八九十";  // 10 CJK chars, no spaces
+  t.segments={s};
+  EngineConfig cfg; cfg.srt_max_chars_per_line = 4;
+  std::string srt = to_srt(t, cfg);
+  // All non-empty non-timecode lines must not start with space
+  auto tpos = srt.find("00:00:00,000 --> 00:00:01,000\n");
+  REQUIRE(tpos != std::string::npos);
+  std::string body = srt.substr(tpos + 30);
+  std::string line;
+  std::istringstream ss(body);
+  bool any_leading_space = false;
+  while (std::getline(ss, line)) {
+    if (!line.empty() && line[0] == ' ') any_leading_space = true;
+  }
+  CHECK_FALSE(any_leading_space);
 }
 
 TEST_CASE("G5: srt multi-byte UTF-8 not split mid-character") {
