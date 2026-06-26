@@ -8,7 +8,7 @@
 ;       仅排除未使用的 TensorRT provider(sherpa 用 CUDA EP,不用 TRT)。
 
 #define MyAppName "suji 中文讲课转写"
-#define MyAppVersion "0.5"
+#define MyAppVersion "0.6"
 #define MyAppPublisher "suji-asr"
 #define MyAppExe "suji_gui.exe"
 #define SrcRel "..\build\Release"
@@ -32,7 +32,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
-; ~模型 819MB + CUDA 运行时 ~2.4GB + ffmpeg 108MB 为主(lzma2 压缩后约 1.5–2GB);允许装到非系统盘
+; ~模型 ~3.0GB(int8-CTC 742MB + fp16-AED 2.2GB + 标点 77MB)+ CUDA 运行时 ~2.4GB + ffmpeg 108MB(lzma2 压缩后约 2.5–3.5GB);允许装到非系统盘
 UsePreviousAppDir=yes
 
 [Languages]
