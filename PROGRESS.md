@@ -168,3 +168,21 @@ T2 nvidia-smi→CreateProcessW、T3 decoding_method 可配、T5 max_batch/max_th
 | D14 | T4 ITN 只接线、默认关(无 asset)、不加 GUI 控件 | 讲座数字保口语常 OK + ITN 易误触 | 加 GUI 字段 |
 - **已评估暂缓(低价值/非问题)**:G3(消费者 try_pop 非阻塞,欠满 batch 已即时 flush,无需定时器)、G4(长度分桶,收益边际)、G8(cudaMemGetInfo 需链 cudart;nvidia-smi 已够)、T15(ASR 黄金转写脆弱)。
 - **NEEDS-HUMAN**:① `git push`(本地领先 origin 103 提交)② 3070 Ti 上 benchmark 异构 vs 单引擎 ③ GUI 视觉/交互人工确认 ④ 干净机/3070 Ti 装一次 setup.exe ⑤ ITN FST asset 获取 ⑥ G2 深层 OOM-abort 路径需真显存耗尽验证 ⑦ fp16 模型方向 ⑧ 跨平台(T13,当前 Windows-only by design)。
+
+## 🌙 通宵自主推进(2026-06-26→27,均在 main 本地提交,**未 push**)
+进入无人值守「自主连续推进」。本轮:
+
+### 0. GUI 空状态提示居中修复(合 main `b680619`)
+用户实测:无文件时「拖入视频…」提示挤在表头左上角、被换行截断。根因:`updateEmptyState()` 用表格视口尺寸居中,却在视口拿到真实尺寸前就摆放。修:监听视口自身 resize(`eventFilter`)重新居中 + 单行(关 wordWrap)。加 `--screenshot-empty` 离屏验证居中。回退:revert `b680619`。
+
+### 1. ⭐ 流式解码 — 多小时单文件的解法(合 main `71ce21a`,强模型实现 + 对抗评审 APPROVE)
+**背景**:用户工作场景单个视频可达几小时。旧 `decode_to_pcm` 整文件 PCM(~230MB/小时)读进内存再 VAD → 几小时 = 0.7–1.5GB 内存峰值 + 几十秒「全解码完才开始转写」死等。
+**做法**:① `Vad` 增量流式 API `reset()`/`accept(data,n,on_seg,cancel)`/`finish()`,`leftover_` 跨调用缓存 <window_ 样本、按 window_ 整块喂 sherpa → 与旧路径逐字节相同(7 种 chunk 大小不变性测试,163K 断言);`segment_stream`=reset+accept+finish 单一路径。② `decode_vad_stream`:复用 `decode_to_pcm` 的 CreateProcessW+管道+可取消读循环,每次读到的 PCM 直接喂 `vad.accept`(跨读携带 <4 mid-float 字节),从不持有整文件;`decode_to_pcm` 保留(suji_cli)。③ 两条生产者(single+hetero)改用之,同一 push lambda+计数,段时间戳保持全局。
+**实测**(2080):20min 文件 hetero 1/1 ok **7.0×**,转写从第 ~2 秒就开始;内存 73MB 整文件 buffer → 64KB 读 buffer + VAD leftover。短/6×60s 多文件无回退。**评审 7 项全 OK**(mid-float 携带、leftover reset、finish、背压无死锁=取消 close 队列释放 push、句柄清理、段身份、计数/R6)。全测试 **183/183**。回退:revert `55dca3e`+`71ce21a`。
+
+### 2. P5 长度分桶(首版 no-gain 已回滚 → 正按单文件门控重做,后台进行中)
+首版(强模型+实测 AB 配对):bench10 单长文件 **+19%(6.9→8.2×)**;bench_multi 6×60s **−3.5%**(短均匀片无长度方差可分桶,holding buffer 扰动 work-stealing,GPU 囤段=P3 饿死风险)。「两组都要提升」门 → 回滚(无 race,185 测试绿,纯按吞吐拒)。
+**决策(自主)**:用户主场景=单个多小时文件,正是 +19% 命中处;−3.5% 只在多短文件(非其场景)。→ **重做:分桶仅 `nfiles==1` 启用**,`nfiles>1` 与 main 逐字节同路径(不回退);门控=输入数算一次的确定式 bool。回退:删门控。**[后台 agent 重做+实测中]**
+
+### 3. 安装包 0.6 重建(就绪,待 P5 落定后构建)
+fp16-AED(2.2GB)已在 `models/`,`.iss` 第61行 `models\*` 递归 → 自动打包。版本 0.5→0.6 + 更新体积注释(模型~3.0GB int8+fp16 + CUDA2.4GB,压缩后约 2.5–3.5GB,提交 `<.iss>`)。ISCC 已装。待 P5 合并后跑 `scripts\build_installer.ps1` 打包含流式解码+P5门控的最新 exe。
