@@ -15,10 +15,16 @@ struct FileResult { std::string input; bool ok=false; std::string err; Transcrip
 // cpu_segs / gpu_segs = LIVE per-consumer segment counts (hetero engine only; 0 for
 //   single-provider paths). Lets the GUI show a live "CPU% / GPU%" split instead of
 //   only logging the ratio after completion. (G14)
+// segs_done / segs_total = SEGMENT-based progress. Producers increment segs_total by 1
+//   right before each queue.push; consumers increment segs_done by 1 per segment routed.
+//   Drives a concrete, determinate % bar that reaches 100% (segs_done==segs_total on a
+//   clean run), unlike the speech-seconds/full-duration ratio which caps below 100% on
+//   files with silence and freezes during a long GPU batch.
 struct BatchProgress {
   int files_total=0; int files_done=0;
   double audio_seconds_done=0; double total_audio_decoded=0;
   long long cpu_segs=0; long long gpu_segs=0;
+  long long segs_done=0; long long segs_total=0;
 };
 using ProgressCb = std::function<void(const BatchProgress&)>;
 // Decodes+VADs files on producer threads, batches ASR on one consumer (owns recognizer),

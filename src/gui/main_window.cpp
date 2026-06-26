@@ -339,13 +339,12 @@ void MainWindow::onStart()
         return;
     }
 
-    // Determine output directory: use chosen dir or default "out"
-    QString outDir = m_outputDir;
-    if (outDir.isEmpty()) {
-        outDir = QStringLiteral("out");
-        m_outDirLabel->setText(outDir);
-    }
-    QDir().mkpath(outDir);
+    // Output directory: a chosen dir, or empty => write next to each source file
+    // (the worker resolves an empty outDir to the input's own directory, matching the
+    // "（与源文件相同）" label, which we leave untouched when no dir is chosen).
+    const QString outDir = m_outputDir;
+    if (!outDir.isEmpty())
+        QDir().mkpath(outDir);
 
     // Reset UI state
     m_btnStart->setEnabled(false);
@@ -371,6 +370,8 @@ void MainWindow::onStart()
     m_lastTotalAudio  = 0.0;
     m_lastCpuSegs     = 0;
     m_lastGpuSegs     = 0;
+    m_lastSegsDone    = 0;
+    m_lastSegsTotal   = 0;
     m_lastPct         = 0;
     m_emaRate         = 0.0;
     m_prevAudioSec    = -1.0;
@@ -434,7 +435,8 @@ void MainWindow::onWorkerStarted(QString provider, int filesTotal)
 }
 
 void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec,
-                                  long long cpuSegs, long long gpuSegs)
+                                  long long cpuSegs, long long gpuSegs,
+                                  long long segsDone, long long segsTotal)
 {
     auto now = std::chrono::steady_clock::now();
     // First progress callback = transcription has begun; anchor here so the elapsed/
@@ -460,13 +462,22 @@ void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec
     m_prevAudioSec = audioSec;
     m_prevRateTime = now;
 
-    int pct = (totalAudioSec > 0.5)
-              ? std::min(99, static_cast<int>(100.0 * audioSec / totalAudioSec))
-              : 0;
-    // Leave busy/indeterminate mode on the first real progress, then show %.
-    if (m_progress->maximum() == 0)
-        m_progress->setRange(0, 100);
-    m_progress->setValue(pct);
+    // Segment-based progress: a concrete, determinate bar that reaches 100% when every
+    // segment is routed. segsTotal grows as files finish VAD, so early on (segsTotal==0,
+    // still decoding/VAD) we keep the marquee/indeterminate bar. Once segments exist we
+    // switch to a real percentage. This replaces the old speech-seconds/full-duration
+    // ratio that capped below 100% on files with silence and froze during long batches.
+    int pct;
+    if (segsTotal > 0) {
+        pct = std::min(100, static_cast<int>(100 * segsDone / segsTotal));
+        // Leave busy/indeterminate mode on the first real progress, then show %.
+        if (m_progress->maximum() == 0)
+            m_progress->setRange(0, 100);
+        m_progress->setValue(pct);
+    } else {
+        // Still decoding/VAD — no segments queued yet; keep the indeterminate marquee.
+        pct = 0;
+    }
 
     // G14: store the latest snapshot so the 1s tick can recompute elapsed/ETA between
     // callbacks without waiting for the (possibly seconds-away) next engine progress.
@@ -476,6 +487,8 @@ void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec
     m_lastTotalAudio = totalAudioSec;
     m_lastCpuSegs    = cpuSegs;
     m_lastGpuSegs    = gpuSegs;
+    m_lastSegsDone   = segsDone;
+    m_lastSegsTotal  = segsTotal;
     m_lastPct        = pct;
 
     renderStatusLine();
@@ -521,11 +534,18 @@ void MainWindow::renderStatusLine()
     int elapsedMin  = static_cast<int>(overall) / 60;
     int elapsedSecs = static_cast<int>(overall) % 60;
 
+    // Concrete segment count the user can watch tick up every batch (已转写 N/M 段).
+    // Build via QStringLiteral so the segment numbers can't be mis-read as arg markers.
+    const QString segStr = QStringLiteral("  已转写 ")
+        + QString::number(m_lastSegsDone) + QStringLiteral("/")
+        + QString::number(m_lastSegsTotal) + QStringLiteral(" 段");
+
     const QString pctStr = QString::number(m_lastPct) + QStringLiteral("%");
-    setStatusText(tr("处理中 %1  %2/%3  %4 倍速  (已转写 %5 秒, 用时 %6:%7)%8%9")
+    setStatusText(tr("处理中 %1  %2/%3 文件%4  %5 倍速  (已转写 %6 秒, 用时 %7:%8)%9%10")
         .arg(pctStr)
         .arg(m_lastFilesDone)
         .arg(m_lastFilesTotal)
+        .arg(segStr)
         .arg(speed, 0, 'f', 1)
         .arg(static_cast<int>(m_lastAudioSec))
         .arg(elapsedMin, 2, 10, QChar('0'))
@@ -543,8 +563,11 @@ void MainWindow::renderStatusLine()
 void MainWindow::onSecondTick()
 {
     if (!m_jobRunning) return;
-    if (m_lastTotalAudio <= 0.0 && m_lastAudioSec <= 0.0)
-        return;   // still in decode/VAD; keep the "preparing" status as-is
+    // Still in decode/VAD with nothing queued yet -> keep the "preparing" status as-is.
+    // Once any segment exists (segs_total>0) or audio has been transcribed, render the
+    // live line so the concrete 已转写 N/M 段 count keeps ticking between callbacks.
+    if (m_lastSegsTotal <= 0 && m_lastTotalAudio <= 0.0 && m_lastAudioSec <= 0.0)
+        return;
     renderStatusLine();
 }
 

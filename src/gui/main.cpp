@@ -150,9 +150,10 @@ int main(int argc, char** argv)
             std::fflush(stdout);
         });
         QObject::connect(&w, &suji::EngineWorker::progress,
-            [](int d, int t, double a, double tot, long long cs, long long gs) {
-            std::printf("progress: %d/%d audio=%.1f total=%.1f cpu=%lld gpu=%lld\n",
-                        d, t, a, tot, cs, gs); std::fflush(stdout);
+            [](int d, int t, double a, double tot, long long cs, long long gs,
+               long long sd, long long st) {
+            std::printf("progress: %d/%d audio=%.1f total=%.1f cpu=%lld gpu=%lld segs=%lld/%lld\n",
+                        d, t, a, tot, cs, gs, sd, st); std::fflush(stdout);
         });
         QObject::connect(&w, &suji::EngineWorker::fileResult, [](QString path, bool ok, int segs, QString err) {
             std::printf("fileResult: ok=%d segs=%d err=%s\n", ok, segs, err.toUtf8().constData());

@@ -63,7 +63,8 @@ public slots:
     // Worker signal handlers
     void onWorkerStarted(QString provider, int filesTotal);
     void onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec,
-                          long long cpuSegs, long long gpuSegs);
+                          long long cpuSegs, long long gpuSegs,
+                          long long segsDone, long long segsTotal);
     void onWorkerFileResult(QString path, bool ok, int segments, QString err);
     void onWorkerFinished(int ok, int failed, int cancelled, double wallSec);
 
@@ -130,6 +131,8 @@ private:
     double    m_lastTotalAudio   = 0.0;   // total speech to transcribe (for %)
     long long m_lastCpuSegs      = 0;
     long long m_lastGpuSegs      = 0;
+    long long m_lastSegsDone     = 0;     // segment-based progress: segments routed so far
+    long long m_lastSegsTotal    = 0;     // segment-based progress: segments queued so far
     int       m_lastPct          = 0;     // last computed % (held between ticks)
 
     // EMA of the instantaneous transcription rate (倍速). Smooths out the noisy,

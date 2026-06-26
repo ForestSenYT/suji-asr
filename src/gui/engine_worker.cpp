@@ -34,6 +34,26 @@ static std::string stem(const std::string& p) {
     if (dot != std::string::npos && dot != 0) name = name.substr(0, dot);
     return name;
 }
+
+// UTF-8-safe parent directory: everything up to (not incl.) the last path
+// separator. Operates on the raw UTF-8 bytes (ASCII-transparent) so Chinese
+// path components survive — routing through std::filesystem's narrow path would
+// re-interpret UTF-8 as the system ANSI codepage and mangle them. Returns "."
+// when the input has no separator (a bare filename in the cwd).
+static std::string parent_dir(const std::string& p) {
+    size_t slash = p.find_last_of("/\\");
+    return (slash == std::string::npos) ? std::string(".") : p.substr(0, slash);
+}
+
+// Resolve the output base (path without extension) for one input file.
+// outDirStd empty  -> next to the SOURCE file: parent_dir(input)/stem(input)
+//                     (matches the "（与源文件相同）" toolbar label).
+// outDirStd set    -> the chosen dir: outDirStd/stem(input) (unchanged behaviour).
+static std::string resolve_base(const std::string& input, const std::string& outDirStd) {
+    if (outDirStd.empty())
+        return parent_dir(input) + "/" + stem(input);
+    return outDirStd + "/" + stem(input);
+}
 } // namespace
 
 void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
@@ -130,17 +150,15 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
         vec.emplace_back(p.toUtf8().constData());
 
     // ------------------------------------------------------------------
-    // Ensure output directory exists
+    // Resolve output location. Empty outDir => write next to each SOURCE file
+    // (matches the "（与源文件相同）" toolbar label); a chosen dir is created up
+    // front. Per-file bases are computed via resolve_base() below.
     // ------------------------------------------------------------------
-    std::string outDirStd;
-    if (outDir.isEmpty()) {
-        outDirStd = "out";
-        outDir    = QStringLiteral("out");
-    } else {
-        outDirStd = outDir.toUtf8().constData();
+    const std::string outDirStd = outDir.isEmpty() ? std::string() : outDir.toUtf8().constData();
+    if (!outDirStd.empty()) {
+        QDir().mkpath(outDir);
+        std::filesystem::create_directories(outDirStd);
     }
-    QDir().mkpath(outDir);
-    std::filesystem::create_directories(outDirStd);
 
     // ------------------------------------------------------------------
     // G7: Resume partition — skip files whose outputs are already complete.
@@ -152,7 +170,7 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     // skipped_inputs preserves order so we can emit fileResult for them later
     std::vector<std::string> skipped_inputs;
     for (const std::string& f : vec) {
-        std::string base_candidate = outDirStd + "/" + stem(f);
+        std::string base_candidate = resolve_base(f, outDirStd);
         // Compute the unique base for this file (G6 dedup across the whole batch).
         std::string base = base_candidate;
         int n = 2;
@@ -193,7 +211,7 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
         todo, c, tune,
         [this, totalAudio](const BatchProgress& b) {
             emit progress(b.files_done, b.files_total, b.audio_seconds_done, totalAudio,
-                          b.cpu_segs, b.gpu_segs);
+                          b.cpu_segs, b.gpu_segs, b.segs_done, b.segs_total);
         },
         &cancel_
     );
@@ -226,7 +244,7 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
             // G6: deduplicate output base when two inputs share the same filename.
             // used_bases was pre-seeded during resume partition, so collisions are
             // detected even between todo-batch outputs and resumed-file bases.
-            std::string base_candidate = outDirStd + "/" + stem(r.input);
+            std::string base_candidate = resolve_base(r.input, outDirStd);
             std::string base = base_candidate;
             int nn = 2;
             while (used_bases.count(base)) { base = base_candidate + "_" + std::to_string(nn++); }

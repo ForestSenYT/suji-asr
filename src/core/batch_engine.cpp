@@ -80,6 +80,10 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
   // G13: total DECODED audio duration in samples (full file length incl. silence),
   // accumulated by producers. Drives the FINAL aggregate throughput (true audio-hours).
   std::atomic<long long> decoded_samples{0};
+  // Segment-based progress: producer +1 to segs_total before each push; consumer +1 to
+  // segs_done per segment routed. segs_done==segs_total on a clean run -> bar hits 100%.
+  std::atomic<long long> segs_total{0};
+  std::atomic<long long> segs_done{0};
 
   // producers: decode + VAD; push SegTask; record failures
   int nprod = std::max(1, tune.in_flight_files);
@@ -112,6 +116,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
         log_info("切分语音: " + inputs[fi] + " (" + std::to_string(segs.size()) + " 段)");  // G14: VAD done
         for(auto& s : segs){
           seg_pending[fi].fetch_add(1);              // R6 fix: count before push
+          segs_total.fetch_add(1);                   // segment-based progress: total grows as files are VADed
           SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples);
           queue.push(std::move(st));
         }
@@ -147,6 +152,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
       for(auto& b : batch){
         samples_done += b.samples.size();
         seg_pending[b.file_id].fetch_sub(1);         // R6 fix: segment fully consumed
+        segs_done.fetch_add(1);                      // segment-based progress: one segment routed
       }
       // live progress: throttle to ~150 ms so we don't flood the GUI
       if(cb){
@@ -157,6 +163,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
           BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
           bp.audio_seconds_done=(double)samples_done.load()/16000.0;
           bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
+          bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load();
           cb(bp);
         }
       }
@@ -187,7 +194,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
       results[i].transcript = std::move(tr);
     }
     files_done++;                                  // count every file (ok or failed)
-    if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; bp.total_audio_decoded=(double)decoded_samples.load()/16000.0; cb(bp); }
+    if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; bp.total_audio_decoded=(double)decoded_samples.load()/16000.0; bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load(); cb(bp); }
   }
   return results;
 }
@@ -244,6 +251,10 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   std::atomic<long long> decoded_samples{0};
   // H9: per-consumer segment counters for split-ratio observability
   std::atomic<long long> cpu_segs{0}, gpu_segs{0};
+  // Segment-based progress: producer +1 to segs_total before each push; consumers +1 to
+  // segs_done per segment routed. segs_done==segs_total on a clean run -> bar hits 100%.
+  std::atomic<long long> segs_total{0};
+  std::atomic<long long> segs_done{0};
 
   // producers: identical to the single path.
   int nprod = std::max(1, tune.in_flight_files);
@@ -274,6 +285,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
         log_info("切分语音: " + inputs[fi] + " (" + std::to_string(segs.size()) + " 段)");  // G14: VAD done
         for(auto& s : segs){
           seg_pending[fi].fetch_add(1);              // R6 fix: count before push
+          segs_total.fetch_add(1);                   // segment-based progress: total grows as files are VADed
           SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples);
           queue.push(std::move(st));
         }
@@ -311,6 +323,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
       for(auto& b : batch){
         samples_done += b.samples.size();
         seg_pending[b.file_id].fetch_sub(1);         // R6 fix: segment fully consumed
+        segs_done.fetch_add(1);                      // segment-based progress: one segment routed
       }
       seg_counter += (long long)batch.size();        // H9: count segments processed by this consumer
       if(cb && !cb_lock.exchange(true)){              // best-effort throttled live cb
@@ -322,6 +335,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
           bp.audio_seconds_done=(double)samples_done.load()/16000.0;
           bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
           bp.cpu_segs=cpu_segs.load(); bp.gpu_segs=gpu_segs.load();   // G14: live split
+          bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load();
           cb(bp);
         }
         cb_lock.store(false);
@@ -373,7 +387,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
       results[i].transcript = std::move(tr);
     }
     files_done++;
-    if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; bp.total_audio_decoded=(double)decoded_samples.load()/16000.0; bp.cpu_segs=cpu_segs.load(); bp.gpu_segs=gpu_segs.load(); cb(bp); }
+    if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; bp.total_audio_decoded=(double)decoded_samples.load()/16000.0; bp.cpu_segs=cpu_segs.load(); bp.gpu_segs=gpu_segs.load(); bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load(); cb(bp); }
   }
   return results;
 }

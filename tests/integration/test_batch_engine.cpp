@@ -58,6 +58,28 @@ TEST_CASE("batch tracks full decoded audio duration for throughput (G13)" * doct
   CHECK(last_total >= last_speech);
 }
 
+// Segment-based progress: on a clean (non-cancelled) run every queued segment is
+// routed, so the final BatchProgress must report segs_done == segs_total, with
+// segs_total > 0 (the files have speech). This drives the determinate GUI bar to 100%.
+TEST_CASE("batch segment progress: segs_done equals segs_total on clean run" * doctest::timeout(300)){
+  std::string w=md()+"/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/";
+  std::vector<std::string> inputs={ w+"0.wav", w+"1.wav" };
+  AutoTune tune; tune.provider=Provider::Cpu; tune.batch=4; tune.in_flight_files=2; tune.num_threads=4;
+  long long last_done = 0, last_total = 0;
+  // also assert monotonicity: segs_done never exceeds segs_total at any callback.
+  bool ever_exceeded = false;
+  auto res = transcribe_batch_files(inputs, cfg(), tune, [&](const BatchProgress& b){
+    last_done  = b.segs_done;
+    last_total = b.segs_total;
+    if (b.segs_done > b.segs_total) ever_exceeded = true;
+  });
+  REQUIRE(res.size()==2);
+  for(auto& r : res) CHECK(r.ok);
+  CHECK_FALSE(ever_exceeded);        // segs_done <= segs_total throughout
+  CHECK(last_total > 0);             // files have speech -> segments queued
+  CHECK(last_done == last_total);    // clean run: every segment routed -> bar reaches 100%
+}
+
 TEST_CASE("live progress fires during transcription (not only at finalize)" * doctest::timeout(300)){
   // 0.wav has multiple VAD segments -> multiple consumer batches -> consumer cb fires > 1 time
   // finalize loop fires exactly 1 time (one file). So cb_count > 1 proves live emission.
