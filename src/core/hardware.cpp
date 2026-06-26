@@ -6,20 +6,90 @@
 #include <string>
 #include <sstream>
 #include <algorithm>
+#include <vector>
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
 #endif
 namespace suji {
-static bool run_capture(const std::string& cmd, std::string& out){
+#ifdef _WIN32
+// Convert a UTF-8 std::string to a UTF-16 std::wstring.
+static std::wstring utf8_to_wide(const std::string& utf8){
+  if(utf8.empty()) return {};
+  int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+  if(n <= 0) return {};
+  std::wstring w(static_cast<size_t>(n - 1), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, w.data(), n);
+  return w;
+}
+// Run `nvidia_smi <args>` via CreateProcessW (NO cmd.exe shell, no ANSI codepage),
+// capturing its stdout into `out`. Mirrors the media_decode.cpp CreateProcessW pattern:
+// inheritable stdout pipe, NUL for stderr, CREATE_NO_WINDOW, ReadFile loop.
+// Returns false (and leaves out empty/partial) on any failure -> no-GPU safe fallback.
+static bool run_capture(const std::string& nvidia_smi, const std::wstring& args, std::string& out){
   out.clear();
-  FILE* p = _popen(cmd.c_str(), "r");
-  if(!p) return false;
-  char buf[512]; size_t n;
-  while((n=fread(buf,1,sizeof(buf),p))>0) out.append(buf,n);
-  _pclose(p);
+  std::wstring exe_w = utf8_to_wide(nvidia_smi);
+  if(exe_w.empty()) return false;
+
+  // Build a mutable command line: "<nvidia-smi>" <args>. lpApplicationName is NULL so the
+  // PATH is searched (nvidia-smi is normally on PATH). Quote the exe to tolerate spaces.
+  std::wstring cmdline = L"\"" + exe_w + L"\" " + args;
+
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength        = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+
+  HANDLE pipe_read  = INVALID_HANDLE_VALUE;
+  HANDLE pipe_write = INVALID_HANDLE_VALUE;
+  if(!CreatePipe(&pipe_read, &pipe_write, &sa, 0)) return false;
+  if(!SetHandleInformation(pipe_read, HANDLE_FLAG_INHERIT, 0)){
+    CloseHandle(pipe_read); CloseHandle(pipe_write); return false;
+  }
+
+  // stderr -> NUL so nvidia-smi diagnostics never pollute the captured stdout.
+  HANDLE nul_handle = CreateFileW(L"NUL", GENERIC_WRITE,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  &sa, OPEN_EXISTING, 0, nullptr);
+  if(nul_handle == INVALID_HANDLE_VALUE){
+    CloseHandle(pipe_read); CloseHandle(pipe_write); return false;
+  }
+
+  STARTUPINFOW si{};
+  si.cb         = sizeof(si);
+  si.dwFlags    = STARTF_USESTDHANDLES;
+  si.hStdInput  = nullptr;
+  si.hStdOutput = pipe_write;
+  si.hStdError  = nul_handle;
+
+  PROCESS_INFORMATION pi{};
+  BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr,
+                           TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+
+  CloseHandle(pipe_write);
+  CloseHandle(nul_handle);
+
+  if(!ok){ CloseHandle(pipe_read); return false; }   // nvidia-smi missing -> no-GPU fallback
+
+  // Read nvidia-smi's stdout (ASCII CSV) until EOF.
+  std::vector<char> chunk(512);
+  DWORD bytes_read = 0;
+  while(ReadFile(pipe_read, chunk.data(), static_cast<DWORD>(chunk.size()), &bytes_read, nullptr)
+        && bytes_read > 0){
+    out.append(chunk.data(), bytes_read);
+  }
+  CloseHandle(pipe_read);
+
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
   return !out.empty();
 }
+#else
+static bool run_capture(const std::string&, const std::wstring&, std::string& out){
+  out.clear();
+  return false;   // non-Windows: no nvidia-smi probe -> no-GPU fallback
+}
+#endif
 HardwareInfo probe_hardware(const std::string& nvidia_smi){
   HardwareInfo h;
   h.cpu_threads = (int)std::max(1u, std::thread::hardware_concurrency());
@@ -29,8 +99,9 @@ HardwareInfo probe_hardware(const std::string& nvidia_smi){
 #endif
   // nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits
   std::string out;
-  std::string cmd = "\"" + nvidia_smi + "\" --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits 2>nul";
-  if(run_capture(cmd, out)){
+  if(run_capture(nvidia_smi,
+                 L"--query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits",
+                 out)){
     // first line: "NVIDIA GeForce RTX 2080, 8192, 6000"
     std::istringstream ls(out); std::string line;
     if(std::getline(ls,line) && line.find(',')!=std::string::npos){
