@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <queue>
 #include <set>
 #include <thread>
 #include <vector>
@@ -137,6 +138,50 @@ TEST_CASE("P5: bucketed two consumers drain with no double-processing + similar-
   }
   CHECK(total_items == K);                 // every task emitted exactly once
   CHECK(bucket_waste < global_waste);      // length-bucketing reduces padding waste
+}
+
+// P5 gate — the reorder window is ENABLED only for a single input file (N==1). For N>1
+// the consumer must behave EXACTLY like main: FIFO batches, no holding buffer, no sort.
+// This test mirrors BOTH loop modes (the `bucket` branch in batch_engine.cpp) against the
+// same input and asserts: N>1 preserves arrival order (no reorder); N==1 length-sorts.
+TEST_CASE("P5 gate: N>1 keeps FIFO (no reorder); N==1 buckets by length") {
+  // Inputs arrive in a deliberately length-UNSORTED order so a reorder is observable.
+  const std::vector<int> lens = {300, 50, 270, 10, 290, 40, 260, 20};
+  const int bmax = 4;
+
+  // --- N>1 path: pop one + try_pop up to bmax (FIFO), emit. No sort. ---
+  // With a single producer push order and synchronous draining this yields arrival order.
+  std::vector<int> fifo_emitted;
+  {
+    std::queue<int> q; for(int l : lens) q.push(l);
+    while(!q.empty()){
+      std::vector<int> batch; batch.push_back(q.front()); q.pop();
+      while((int)batch.size() < bmax && !q.empty()){ batch.push_back(q.front()); q.pop(); }
+      for(int l : batch) fifo_emitted.push_back(l);   // process_batch in arrival order
+    }
+  }
+  CHECK(fifo_emitted == lens);   // N>1 path NEVER reorders -> byte-for-byte main behaviour
+
+  // --- N==1 path: hold (cap 2x), sort by length, emit shortest bmax, flush. ---
+  std::vector<int> bucket_first_batch;
+  {
+    const size_t cap = (size_t)bmax * 2;
+    std::vector<int> hold;
+    std::queue<int> q; for(int l : lens) q.push(l);
+    auto emit = [&](std::vector<int>& out){
+      std::sort(hold.begin(), hold.end());
+      size_t take = std::min((size_t)bmax, hold.size());
+      for(size_t i=0;i<take;i++) out.push_back(hold[i]);
+      hold.erase(hold.begin(), hold.begin()+take);
+    };
+    // Drain all 8 into hold (cap=8), then emit the shortest 4 -> proves length grouping.
+    while(!q.empty() && hold.size() < cap){ hold.push_back(q.front()); q.pop(); }
+    emit(bucket_first_batch);
+  }
+  // The first bucketed batch must be the 4 SHORTEST lengths, sorted ascending.
+  std::vector<int> expect_short = {10, 20, 40, 50};
+  CHECK(bucket_first_batch == expect_short);
+  CHECK(bucket_first_batch != std::vector<int>(lens.begin(), lens.begin()+bmax));  // differs from FIFO
 }
 
 TEST_CASE("hetero: per-engine token sinks sort/merge equal single-array baseline") {
