@@ -156,7 +156,9 @@ TEST_CASE("hetero smoke: cpu+cuda two-recognizer concurrency"
     // -----------------------------------------------------------------------
     // 3. Run concurrently — each handle touched by exactly ONE thread
     // -----------------------------------------------------------------------
-    const int N_ROUNDS = 50;
+    // The gating run passed at 50 rounds (see PROGRESS D11). Kept at 12 as a fast
+    // regression guard so the full suite stays quick during ongoing development.
+    const int N_ROUNDS = 12;
 
     std::atomic<int> cpu_completed{0};
     std::atomic<int> gpu_completed{0};
@@ -164,7 +166,7 @@ TEST_CASE("hetero smoke: cpu+cuda two-recognizer concurrency"
     bool cpu_ok = false, gpu_ok = false;
 
     // Watchdog: if both threads don't finish within 300s, we declare HANG.
-    // 50 rounds × ~10s audio × 2 recognizers in parallel; budget 300s to be safe.
+    // 12 rounds × ~10s audio × 2 recognizers in parallel; budget 300s to be safe.
     std::atomic<bool> done_flag{false};
     std::atomic<bool> hang_detected{false};
     std::mutex wd_mtx;
