@@ -258,6 +258,9 @@ bool decode_vad_stream(const std::string& ffmpeg, const std::string& input, Vad&
 
     if (stopped) {
         // Early stop already terminated ffmpeg + closed handles inside the loop.
+        // Still report the samples decoded so far (the clean-EOF path also writes this ~283);
+        // without it a non-cancel early stop leaves *total_samples_out unwritten.
+        if (total_samples_out) *total_samples_out = total_samples;
         return true;   // not an error: caller asked to stop emitting (backpressure)
     }
 

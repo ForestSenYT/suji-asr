@@ -76,7 +76,10 @@ void Vad::finish(const std::function<bool(SpeechSeg&&)>& on_seg) {
   // is NOT fed to AcceptWaveform — Flush handles the tail. Feeding it would change the
   // emitted segments vs. today, so we drop it (segment output stays IDENTICAL).
   SherpaOnnxVoiceActivityDetectorFlush(vad_);
-  drain(on_seg);                  // final tail segments after flush
+  // Honor the interrupt: on cancel during the clean-EOF flush, on_seg returns false and we
+  // must STOP emitting tail segments (mirrors accept()'s drain() check ~66) instead of
+  // invoking on_seg for every remaining tail segment.
+  if(!drain(on_seg)){ leftover_.clear(); return; }   // final tail segments after flush
   leftover_.clear();
 }
 
