@@ -80,6 +80,46 @@ TEST_CASE("batch segment progress: segs_done equals segs_total on clean run" * d
   CHECK(last_done == last_total);    // clean run: every segment routed -> bar reaches 100%
 }
 
+// Per-file segment progress ("每个视频分开"): every BatchProgress callback carries a
+// per-file snapshot in `files`. The Σ-invariant must hold at EVERY callback:
+//   Σ files[i].segs_done == segs_done  AND  Σ files[i].segs_total == segs_total.
+// On a clean run the final snapshot must also have, per started file, segs_done==segs_total
+// (>0), so each file's row can independently reach 100%.
+TEST_CASE("batch per-file segment progress sums to the global counters (Sigma-invariant)" * doctest::timeout(300)){
+  std::string w=md()+"/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/";
+  std::vector<std::string> inputs={ w+"0.wav", w+"1.wav", w+"2.wav" };
+  AutoTune tune; tune.provider=Provider::Cpu; tune.batch=4; tune.in_flight_files=2; tune.num_threads=4;
+  bool sigma_ok = true;          // Σ per-file == global at EVERY callback
+  bool index_in_range = true;    // every file_index is a valid input index
+  long long final_done = 0, final_total = 0;
+  std::vector<FilePstat> final_files;
+  auto res = transcribe_batch_files(inputs, cfg(), tune, [&](const BatchProgress& b){
+    long long sd = 0, st = 0;
+    for (const auto& f : b.files) {
+      if (f.file_index < 0 || f.file_index >= (int)inputs.size()) index_in_range = false;
+      sd += f.segs_done; st += f.segs_total;
+    }
+    if (sd != b.segs_done || st != b.segs_total) sigma_ok = false;
+    final_done = b.segs_done; final_total = b.segs_total; final_files = b.files;
+  });
+  REQUIRE(res.size()==3);
+  for(auto& r : res) CHECK(r.ok);
+  CHECK(index_in_range);
+  CHECK(sigma_ok);                       // Σ per-file == global throughout
+  CHECK(final_total > 0);                // files have speech
+  CHECK(final_done == final_total);      // clean run: all routed
+  // Final snapshot: one entry per started file, each fully done (segs_done==segs_total>0).
+  REQUIRE(final_files.size() == inputs.size());
+  long long sum_done = 0, sum_total = 0;
+  for (const auto& f : final_files) {
+    CHECK(f.segs_total > 0);
+    CHECK(f.segs_done == f.segs_total);
+    sum_done += f.segs_done; sum_total += f.segs_total;
+  }
+  CHECK(sum_done == final_done);
+  CHECK(sum_total == final_total);
+}
+
 TEST_CASE("live progress fires during transcription (not only at finalize)" * doctest::timeout(300)){
   // 0.wav has multiple VAD segments -> multiple consumer batches -> consumer cb fires > 1 time
   // finalize loop fires exactly 1 time (one file). So cb_count > 1 proves live emission.

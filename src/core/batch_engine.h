@@ -20,11 +20,19 @@ struct FileResult { std::string input; bool ok=false; std::string err; Transcrip
 //   Drives a concrete, determinate % bar that reaches 100% (segs_done==segs_total on a
 //   clean run), unlike the speech-seconds/full-duration ratio which caps below 100% on
 //   files with silence and freezes during a long GPU batch.
+// FilePstat = PER-FILE segment progress snapshot. Each callback carries one entry per
+//   input file (file_index = position in the engine's `inputs` vector). Producers grow
+//   that file's segs_total as its VAD segments are pushed; consumers grow its segs_done
+//   as those segments' tokens are routed. Lets the GUI draw a SEPARATE progress bar per
+//   file ("每个视频分开") instead of one shared global bar. INVARIANT (clean run):
+//   Σ files[i].segs_done == segs_done and Σ files[i].segs_total == segs_total.
+struct FilePstat { int file_index=0; long long segs_done=0; long long segs_total=0; };
 struct BatchProgress {
   int files_total=0; int files_done=0;
   double audio_seconds_done=0; double total_audio_decoded=0;
   long long cpu_segs=0; long long gpu_segs=0;
   long long segs_done=0; long long segs_total=0;
+  std::vector<FilePstat> files;   // per-file snapshot (one entry per input file)
 };
 using ProgressCb = std::function<void(const BatchProgress&)>;
 // Decodes+VADs files on producer threads, batches ASR on one consumer (owns recognizer),
