@@ -1,8 +1,14 @@
 #pragma once
 #include <string>
 namespace suji {
-enum class Provider { Cpu, Cuda };
-inline const char* provider_str(Provider p){ return p==Provider::Cuda ? "cuda" : "cpu"; }
+enum class Provider { Cpu, Cuda, Hetero };
+inline const char* provider_str(Provider p){
+  switch(p){
+    case Provider::Cuda:   return "cuda";
+    case Provider::Hetero: return "hetero";
+    default:               return "cpu";
+  }
+}
 struct EngineConfig {
   std::string ffmpeg_path;     // ffmpeg.exe
   std::string asr_model;       // FireRedASR2-CTC model.int8.onnx
