@@ -494,4 +494,25 @@ void MainWindow::setRowError(int row, const QString& err)
         item->setText(err);
 }
 
+// ---------------------------------------------------------------------------
+// Headless test hooks
+// ---------------------------------------------------------------------------
+void MainWindow::testStart(const QString& file)
+{
+    addInputFile(file);
+    onStart();
+}
+
+QString MainWindow::testRowStatus(int row) const
+{
+    if (auto* item = m_model->item(row, ColStatus))
+        return item->text();
+    return QString();
+}
+
+QString MainWindow::testStatusText() const
+{
+    return m_statusLabel ? m_statusLabel->text() : QString();
+}
+
 } // namespace suji

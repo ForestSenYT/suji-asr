@@ -37,6 +37,11 @@ public:
     void setRowSegments(int row, int segs);
     void setRowError(int row, const QString& err);
 
+    // Headless test hooks (offscreen --selftest-gui): drive the real interactive path
+    void testStart(const QString& file);     // addInputFile + onStart
+    QString testRowStatus(int row) const;     // current "状态" cell text
+    QString testStatusText() const;           // bottom status label text
+
 public slots:
     void onAddFiles();
     void onAddFolder();
