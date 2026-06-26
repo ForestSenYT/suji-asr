@@ -44,3 +44,20 @@ powershell -File scripts\benchmark.ps1 -Audio build\bench_audio -CudaDll vendor\
 # 仅 CPU:省略 -CudaDll
 ```
 （`build\bench_audio` 由 loop test_wavs 合成;脚本用 ffprobe 算总时长,各 provider 跑前清输出目录强制重跑。）
+
+## ⭐ P3:hetero `gpu_batch` 扫描(dev 2080,int8)— 2026-06-26
+扫 `gpu_batch ∈ {8,16,24,32,48}`(`--gpu-batch N` 覆盖),bench10.wav(600s)异构:
+
+| gpu_batch | best | avg | GPU 分工 |
+|---|---|---|---|
+| **8** | **6.8×** | **6.0×** | ~31% |
+| 16 | 5.6× | 5.4× | ~36% |
+| 24 | 6.0× | 5.6× | ~40% |
+| 32(旧默认) | 6.2× | 5.6× | ~36% |
+| 48 | 5.7× | 5.4× | ~41% |
+
+- **小 batch 胜**:GPU 是 int8 的**慢半边**,大 batch 让每次 `transcribe_batch` 变长 → GPU 囤积它慢慢解的段,work-stealing 饿死**快的 CPU 半边**。小 batch 让 GPU 单次低延迟 → 少偷活、CPU 多干 → 聚合更高。
+- **AB 配对确认**(8 vs 32,3 对,抵消热漂移):n=8 **5.67×** vs n=32 **5.33×**,8 三连胜(+0.33× / ~6%)。
+- **公式更新**(`fill_hetero`):`clamp((vram_free-2000)/150,8,32)` → `clamp((vram_free-2000)/1024,8,12)`,2080 上落到基准最优 8,仍 VRAM 自适应(更大卡 ≤12,绝不回到更差的 24-48 区)。仅改异构 GPU 半边;独立 `--provider cuda` 路径不动。
+- **多文件无回退**:bench_multi 6×60s,旧 gpu_batch=32 avg **6.40×** → 新默认=8 avg **6.75×**(+~5%)。单文件 bench10 新默认 **6.1×**。
+- **P3b ORT/CUDA 旋钮**:读 sherpa-onnx `c-api.h` —— offline recognizer 仅暴露 `provider`(字符串)/`num_threads`/`debug`/`model_type` 等;**无** CUDA provider options 结构、无 tensorrt、无 graph-opt level、无 `cudnn_conv_algo_search`、**无 IO-binding、无 CUDA Graph**。这些都在 sherpa 内部建 ORT session 时设定,C API 不可达 → 要调需**改 sherpa 源码重编或直接用 ORT,超出范围**。诚实记录,未伪造改动。

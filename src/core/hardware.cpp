@@ -146,9 +146,19 @@ void fill_hetero(AutoTune& t, const HardwareInfo& hw, int num_files) {
   t.cpu_asr_threads = std::min(steady_cpu_asr, std::max(2, C - active_producers - gpu_feed));
 
   t.cpu_batch       = std::clamp(t.cpu_asr_threads / 2, 2, 6);
-  // Reserve 2000 MB: display framebuffer + CUDA allocator fragmentation headroom.
+  // --- GPU batch (hetero CUDA recognizer) -------------------------------------
+  // Empirical bench10.wav sweep (C=16/RTX2080, int8) over {8,16,24,32,48}: SMALL
+  // batches win. AB-paired (8 vs 32, 3 trials): n=8 5.67x avg vs n=32 5.33x avg,
+  // n=8 won every pair (+0.33x / ~6%). Reason: on this model+EP the GPU is the SLOW
+  // half (int8 degrades to fp32+quant on CUDA). A large GPU batch makes each
+  // transcribe_batch call long, so the GPU hoards segments it decodes slowly and the
+  // work-stealing balance starves the FAST CPU half. A small batch keeps GPU per-call
+  // latency low -> the GPU steals less and the CPU carries more -> higher aggregate.
+  // So center on the floor (8) but stay VRAM-clamped + adaptive (not hardcoded): a
+  // much bigger card (e.g. fp16/Ampere, P7) scales modestly, never back into the
+  // measured-worse 24-48 region. Reserve 2000 MB: display FB + allocator frag.
   int headroom      = hw.gpu_free_mb - 2000;
-  t.gpu_batch       = std::clamp(headroom > 0 ? headroom / 150 : 8, 8, 32);
+  t.gpu_batch       = std::clamp(headroom > 0 ? headroom / 1024 : 8, 8, 12);
   t.num_threads     = t.cpu_asr_threads;          // legacy mirror
   t.batch           = t.gpu_batch;                // legacy mirror
 

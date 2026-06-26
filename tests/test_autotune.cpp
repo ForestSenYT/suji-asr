@@ -139,13 +139,15 @@ TEST_CASE("autotune hetero R1 regression: C=16 ram=40000 exact values") {
 // ---- H4: fill_hetero() produces the same tunables as decide()'s hetero branch ----
 
 // fill_hetero(t, hw) must agree with decide() when hardware qualifies for hetero.
-// Primary assertion: C=16, 40 GB free VRAM (gpu_free_mb=6000 -> headroom=4000 (2000MB reserved) ->
-//   gpu_batch=clamp(4000/150,8,32)=clamp(26,8,32)=26), 40 GB RAM.
-TEST_CASE("fill_hetero: synthetic C=16 40GB gpu produces correct tunables") {
+// Primary assertion: C=16, 6 GB free VRAM (gpu_free_mb=6000 -> headroom=4000 (2000MB reserved) ->
+//   gpu_batch=clamp(4000/1024,8,12)=clamp(3,8,12)=8). The small-batch floor is the
+//   benchmarked hetero optimum on the 2080 (int8 GPU is the slow half; small GPU
+//   batch keeps work-stealing tilted toward the fast CPU). See fill_hetero comment.
+TEST_CASE("fill_hetero: synthetic C=16 6GB gpu produces correct tunables") {
   HardwareInfo h;
   h.cpu_threads           = 16;
   h.has_cuda_gpu          = true;
-  h.gpu_free_mb           = 6000;   // 6000-2000=4000; 4000/150=26; clamp(26,8,32)=26
+  h.gpu_free_mb           = 6000;   // 6000-2000=4000; 4000/1024=3; clamp(3,8,12)=8
   h.gpu_total_mb          = 8192;
   h.cuda_runtime_available = true;
   h.ram_free_mb           = 40000;
@@ -162,8 +164,8 @@ TEST_CASE("fill_hetero: synthetic C=16 40GB gpu produces correct tunables") {
   CHECK(t.cpu_asr_threads == 11);
   // cpu_batch = clamp(11/2,2,6) = clamp(5,2,6) = 5
   CHECK(t.cpu_batch == 5);
-  // gpu_batch = clamp((6000-2000)/150, 8, 32) = clamp(26, 8, 32) = 26
-  CHECK(t.gpu_batch == 26);
+  // gpu_batch = clamp((6000-2000)/1024, 8, 12) = clamp(3, 8, 12) = 8 (benchmarked floor)
+  CHECK(t.gpu_batch == 8);
   // postcondition: no oversubscription
   const int gpu_feed = 1;
   CHECK(t.in_flight_files + gpu_feed + t.cpu_asr_threads <= 16);
