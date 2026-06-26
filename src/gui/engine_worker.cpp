@@ -113,6 +113,26 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
         }
     }
 
+    // --- Auto-prefer the fp16 FireRedASR AED model on GPU (mirrors batch_main.cpp) ---
+    // When the fp16-AED model is present AND a working CUDA GPU is available AND the
+    // user didn't force a CPU/hetero provider, use fp16-AED on CUDA: it's ~9.2x faster
+    // than int8-CTC on GPU AND more accurate (int8-CTC leaks "< sil >" markers). So the
+    // GUI "just works" with the better model. fp16 is GPU-only (crashes on the CPU EP),
+    // so the crash-safe CUDA-DLL fallback below (empty cuda_dll_dir -> CPU) still guards
+    // against a missing CUDA runtime. The GUI has no manual --asr-encoder override.
+    if (prov != "cpu" && prov != "hetero" &&
+        hw.has_cuda_gpu && hw.cuda_runtime_available) {
+        AedModel aed = discover_fp16_aed();
+        if (aed.ok()) {
+            tune.provider = Provider::Cuda;
+            c.asr_encoder = aed.encoder;
+            c.asr_decoder = aed.decoder;
+            c.tokens      = aed.tokens;
+            c.cuda_dll_dir = hw.cuda_dll_dir;
+            log_info("using fp16 AED model on GPU (faster + more accurate than int8)");
+        }
+    }
+
     // Crash-safe CUDA/Hetero: only run on GPU when the CUDA DLL dir is known.
     if (tune.provider == Provider::Cuda || tune.provider == Provider::Hetero) {
         c.cuda_dll_dir = hw.cuda_dll_dir;

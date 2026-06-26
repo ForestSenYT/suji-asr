@@ -105,4 +105,35 @@ std::string discover_rule_fsts() {
     return "";
 }
 
+AedModel discover_fp16_aed() {
+    AedModel m;
+    std::error_code ec;
+    const std::string mdl = models_dir();
+
+    for (auto& entry : std::filesystem::directory_iterator(mdl, ec)) {
+        if (ec) break;
+        if (!entry.is_directory(ec)) continue;
+
+        // Match a dir named "sherpa-onnx-fire-red-asr-large-*fp16*".
+        const std::string name = entry.path().filename().string();
+        const std::string prefix = "sherpa-onnx-fire-red-asr-large-";
+        if (name.rfind(prefix, 0) != 0) continue;     // must start with prefix
+        if (name.find("fp16") == std::string::npos) continue;
+
+        // Require all three files to be present before committing.
+        auto enc = entry.path() / "encoder.fp16.onnx";
+        auto dec = entry.path() / "decoder.fp16.onnx";
+        auto tok = entry.path() / "tokens.txt";
+        if (std::filesystem::exists(enc, ec) &&
+            std::filesystem::exists(dec, ec) &&
+            std::filesystem::exists(tok, ec)) {
+            m.encoder = enc.string();
+            m.decoder = dec.string();
+            m.tokens  = tok.string();
+            return m;   // first complete match wins
+        }
+    }
+    return m;   // empty (ok()==false) when no complete fp16-AED model found
+}
+
 } // namespace suji

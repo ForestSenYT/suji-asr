@@ -74,3 +74,35 @@ TEST_CASE("T17: default_model_paths returns non-empty strings consistent with mo
     CHECK(mp.tokens      != mp.punct_model);
     CHECK(mp.vad_model   != mp.punct_model);
 }
+
+// discover_fp16_aed() — auto-detect the fp16 FireRedASR AED model in models_dir().
+TEST_CASE("discover_fp16_aed: returns empty or a complete, existing AedModel") {
+    AedModel m = discover_fp16_aed();
+    std::error_code ec;
+    if (m.ok()) {
+        // When ok(), ALL three paths must exist and be the fp16 AED filenames.
+        CHECK(std::filesystem::exists(m.encoder, ec));
+        CHECK(std::filesystem::exists(m.decoder, ec));
+        CHECK(std::filesystem::exists(m.tokens, ec));
+        CHECK(m.encoder.find("encoder.fp16.onnx") != std::string::npos);
+        CHECK(m.decoder.find("decoder.fp16.onnx") != std::string::npos);
+        CHECK(m.tokens.find("tokens.txt")          != std::string::npos);
+        // The dir matches the expected fp16-AED naming pattern.
+        CHECK(m.encoder.find("sherpa-onnx-fire-red-asr-large-") != std::string::npos);
+        CHECK(m.encoder.find("fp16") != std::string::npos);
+    } else {
+        // ok()==false means an incomplete/empty result: all three must be empty.
+        CHECK(m.encoder.empty());
+        CHECK(m.decoder.empty());
+        CHECK(m.tokens.empty());
+    }
+}
+
+// ok() semantics: requires all three non-empty.
+TEST_CASE("AedModel::ok() is true only when all three paths are set") {
+    AedModel a;
+    CHECK_FALSE(a.ok());
+    a.encoder = "e"; CHECK_FALSE(a.ok());
+    a.decoder = "d"; CHECK_FALSE(a.ok());
+    a.tokens  = "t"; CHECK(a.ok());
+}

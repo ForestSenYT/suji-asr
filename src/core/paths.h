@@ -39,4 +39,19 @@ ModelPaths default_model_paths();
 /// Returns the path of the first match, or "" if none found (ITN stays OFF by default).
 std::string discover_rule_fsts();
 
+/// Result of discover_fp16_aed(): absolute paths to the fp16 FireRedASR AED model
+/// (encoder + decoder + tokens). ok() is true only when all three are present.
+struct AedModel {
+    std::string encoder, decoder, tokens;
+    bool ok() const { return !encoder.empty() && !decoder.empty() && !tokens.empty(); }
+};
+
+/// Auto-discover the fp16 FireRedASR AED model under models_dir().
+/// Scans for a directory matching "sherpa-onnx-fire-red-asr-large-*fp16*" that
+/// contains encoder.fp16.onnx + decoder.fp16.onnx + tokens.txt; returns their
+/// absolute paths if ALL three are present, else an empty AedModel (ok()==false).
+/// UTF-8-safe (std::filesystem with error_code; no throw). NOTE: fp16 is GPU-only
+/// (it crashes on the CPU EP) — callers must gate use on a working CUDA GPU.
+AedModel discover_fp16_aed();
+
 } // namespace suji

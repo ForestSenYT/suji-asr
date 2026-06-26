@@ -199,6 +199,31 @@ int main(int argc, char** argv) {
   }
   // (prov == "auto") -> keep decide()'s choice as-is
 
+  // --- Auto-prefer the fp16 FireRedASR AED model on GPU ---
+  // When the fp16-AED model is present AND a working CUDA GPU is available AND the
+  // user neither forced a CPU/hetero provider nor supplied their own --asr-encoder,
+  // use fp16-AED on CUDA: it's ~9.2x faster than int8-CTC on GPU AND more accurate
+  // (int8-CTC leaks "< sil >" markers + mis-recognizes words). This overrides the
+  // int8 hetero default because fp16-AED-on-GPU alone beats int8-hetero. fp16 is
+  // GPU-only (it crashes on the CPU EP), so the crash-safe CUDA-DLL fallback below
+  // (empty cuda_dll_dir -> CPU) still protects against a missing CUDA runtime.
+  {
+    const bool user_forced_cpu_hetero = (prov == "cpu" || prov == "hetero");
+    const bool user_gave_encoder      = !aed_encoder.empty();
+    if (!user_forced_cpu_hetero && !user_gave_encoder &&
+        hw.has_cuda_gpu && hw.cuda_runtime_available) {
+      AedModel aed = discover_fp16_aed();
+      if (aed.ok()) {
+        tune.provider = Provider::Cuda;
+        c.asr_encoder = aed.encoder;
+        c.asr_decoder = aed.decoder;
+        c.tokens      = aed.tokens;
+        c.cuda_dll_dir = hw.cuda_dll_dir;
+        log_info("using fp16 AED model on GPU (faster + more accurate than int8)");
+      }
+    }
+  }
+
   // --- Resolve CUDA DLL directory for GPU (Cuda or Hetero) providers ---
   if (tune.provider == Provider::Cuda || tune.provider == Provider::Hetero) {
     c.cuda_dll_dir = (!cuda_dll_dir_override.empty() ? cuda_dll_dir_override : hw.cuda_dll_dir);
