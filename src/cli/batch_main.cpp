@@ -110,28 +110,14 @@ int main(int argc, char** argv) {
     + " cores=" + std::to_string(hw.cpu_threads)
     + " ramMB=" + std::to_string(hw.ram_free_mb));
 
-  // Safe CUDA: only attempt CUDA when --cuda-dll-dir is explicitly provided,
-  // or when --provider cuda was explicit without --cuda-dll-dir (do a probe first).
-  // For --provider auto: if tune picked Cuda but no cuda_dll_dir, fall back to CPU
-  // (CUDA DLLs are unlikely to be on PATH on this dev box, and a failed init may crash).
+  // Resolve CUDA DLL directory and ensure it is non-empty before running on GPU.
+  // decide() only picks Cuda when cuda_runtime_available==true, so hw.cuda_dll_dir
+  // is expected to be valid; the user-supplied override takes precedence.
   if (tune.provider == Provider::Cuda) {
-    if (!cuda_dll_dir.empty()) {
-      // User supplied dll dir: set it and do a probe Asr to verify init
-      c.cuda_dll_dir = cuda_dll_dir;
-      EngineConfig probe_cfg = c;
-      probe_cfg.provider = Provider::Cuda;
-      Asr probe(probe_cfg);
-      if (!probe.ok()) {
-        log_err("CUDA unavailable (init failed), falling back to CPU");
-        tune.provider  = Provider::Cpu;
-        c.cuda_dll_dir = {};
-      } else {
-        log_info("CUDA probe ok, running on GPU");
-      }
-    } else {
-      // No cuda_dll_dir supplied: skip CUDA attempt to avoid potential crash
-      // (CUDA runtime DLLs not guaranteed on PATH; empirical behavior: may crash).
-      log_err("CUDA selected but --cuda-dll-dir not provided; falling back to CPU for safety");
+    const std::string& cudaDllDirOverride = cuda_dll_dir;
+    c.cuda_dll_dir = (!cudaDllDirOverride.empty() ? cudaDllDirOverride : hw.cuda_dll_dir);
+    if (c.cuda_dll_dir.empty()) {
+      log_err("CUDA runtime not found, falling back to CPU");
       tune.provider = Provider::Cpu;
     }
   }
