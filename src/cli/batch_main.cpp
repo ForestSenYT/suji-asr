@@ -44,7 +44,7 @@ static int parse_positive_int(const char* s) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--in-flight N] [--cuda-dll-dir <path>] [--srt-line N] [--resume|--no-resume]");
+    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--cpu-threads N] [--in-flight N] [--cuda-dll-dir <path>] [--srt-line N] [--resume|--no-resume]");
     return 2;
   }
 
@@ -63,6 +63,7 @@ int main(int argc, char** argv) {
   int         fbatch         = 0;    // --batch (legacy alias for gpu-batch)
   int         fcpu_batch     = 0;    // --cpu-batch
   int         fgpu_batch     = 0;    // --gpu-batch
+  int         fcpu_threads   = 0;    // --cpu-threads (overrides hetero cpu_asr_threads)
   int         finflight      = 0;
   std::string cuda_dll_dir_override;
   bool        resume         = true;
@@ -84,6 +85,10 @@ int main(int argc, char** argv) {
     else if (a == "--gpu-batch"    && i + 1 < argc) {
       fgpu_batch = parse_positive_int(argv[++i]);
       if (fgpu_batch == 0) { log_err("--gpu-batch requires a positive integer, got: " + std::string(argv[i])); return 2; }
+    }
+    else if (a == "--cpu-threads"  && i + 1 < argc) {
+      fcpu_threads = parse_positive_int(argv[++i]);
+      if (fcpu_threads == 0) { log_err("--cpu-threads requires a positive integer, got: " + std::string(argv[i])); return 2; }
     }
     else if (a == "--in-flight"    && i + 1 < argc) {
       finflight = parse_positive_int(argv[++i]);
@@ -164,6 +169,9 @@ int main(int argc, char** argv) {
   if (fbatch    > 0) { tune.batch = fbatch; tune.gpu_batch = fbatch; }
   if (fgpu_batch > 0) { tune.gpu_batch = fgpu_batch; tune.batch = fgpu_batch; }
   if (fcpu_batch > 0)  tune.cpu_batch = fcpu_batch;
+  // --cpu-threads overrides the hetero CPU-recognizer thread count (and its legacy
+  // num_threads mirror). Lets the user reclaim idle cores during the long ASR phase.
+  if (fcpu_threads > 0) { tune.cpu_asr_threads = fcpu_threads; tune.num_threads = fcpu_threads; }
   if (finflight > 0)   tune.in_flight_files = finflight;
 
   // --- Recompute CPU threads/batch after any flip to CPU ---
