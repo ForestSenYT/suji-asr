@@ -4,6 +4,7 @@
 #include "core/asr.h"
 #include "core/punctuation.h"
 #include "core/segment_merge.h"
+#include "core/log.h"
 
 namespace suji {
 
@@ -23,6 +24,7 @@ bool transcribe_file(const EngineConfig& cfg, const std::string& input,
 
     // 4. Punctuator — non-fatal; passthrough if !ok
     Punctuator punct(cfg);
+    if (!punct.ok()) log_err("punct model not loaded: passthrough (no punctuation)");
 
     // 5. VAD segmentation
     auto segs = vad.segment(audio);
