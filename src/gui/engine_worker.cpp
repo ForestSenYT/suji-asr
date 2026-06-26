@@ -3,6 +3,7 @@
 #include "core/batch_engine.h"
 #include "core/hardware.h"
 #include "core/config.h"
+#include "core/log.h"
 #include "core/output/writer_facade.h"
 #include "core/paths.h"
 
@@ -58,21 +59,32 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     c.out_md   = md;
 
     // ------------------------------------------------------------------
-    // Hardware probe — always force CPU for safety (CUDA without DLLs
-    // hard-crashes; benchmark shows CPU int8 is fastest anyway).
+    // Hardware probe + adaptive provider selection
     // ------------------------------------------------------------------
     HardwareInfo hw   = probe_hardware();
     AutoTune     tune = decide(hw, c);
 
-    // Force CPU regardless of the provider arg
-    tune.provider   = Provider::Cpu;
-    tune.num_threads = std::max(4, hw.cpu_threads);
-    tune.batch       = std::min(4, std::max(1, hw.cpu_threads / 4));
-    c.provider       = Provider::Cpu;
-    c.num_threads    = tune.num_threads;
+    // Honor the UI provider combo: "auto" keeps decide()'s choice.
+    std::string prov = provider.toStdString();
+    if      (prov == "cpu")  tune.provider = Provider::Cpu;
+    else if (prov == "cuda") tune.provider = Provider::Cuda;
 
-    // If the user chose CUDA we silently use CPU (CUDA = future enhancement).
-    // (We don't emit a warning signal here; the finished signal implicitly says CPU.)
+    // Crash-safe CUDA: only run on GPU when the CUDA DLL dir is known.
+    if (tune.provider == Provider::Cuda) {
+        c.cuda_dll_dir = hw.cuda_dll_dir;          // auto-detected path
+        if (c.cuda_dll_dir.empty()) { tune.provider = Provider::Cpu; }   // no CUDA runtime -> CPU
+    }
+
+    // Recompute CPU tunables after any fallback.
+    if (tune.provider == Provider::Cpu) {
+        tune.num_threads = std::max(4, hw.cpu_threads);
+        tune.batch       = std::min(4, std::max(1, hw.cpu_threads / 4));
+    }
+
+    log_info(std::string("GUI engine: provider=") + provider_str(tune.provider));
+
+    c.provider    = tune.provider;
+    c.num_threads = tune.num_threads;
 
     // ------------------------------------------------------------------
     // Convert QStringList -> std::vector<std::string> (UTF-8 for Chinese)
@@ -99,6 +111,9 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     // Run transcription
     // ------------------------------------------------------------------
     auto t0 = std::chrono::steady_clock::now();
+
+    emit started(QString::fromUtf8(provider_str(tune.provider)),
+                 static_cast<int>(vec.size()));
 
     auto results = transcribe_batch_files(
         vec, c, tune,

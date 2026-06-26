@@ -196,6 +196,8 @@ MainWindow::MainWindow(QWidget* parent)
     worker_       = new EngineWorker();
     worker_->moveToThread(workerThread_);
 
+    connect(worker_, &EngineWorker::started,
+            this,    &MainWindow::onWorkerStarted);
     connect(worker_, &EngineWorker::progress,
             this,    &MainWindow::onWorkerProgress);
     connect(worker_, &EngineWorker::fileResult,
@@ -311,6 +313,13 @@ void MainWindow::onCancel()
 // ---------------------------------------------------------------------------
 // Worker signal handlers
 // ---------------------------------------------------------------------------
+void MainWindow::onWorkerStarted(QString provider, int filesTotal)
+{
+    setStatusText(tr("正在用 %1 转写 %2 个文件…")
+        .arg(provider.toUpper())
+        .arg(filesTotal));
+}
+
 void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec)
 {
     if (filesTotal > 0)

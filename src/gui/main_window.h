@@ -46,6 +46,7 @@ public slots:
     void onCancel();
 
     // Worker signal handlers
+    void onWorkerStarted(QString provider, int filesTotal);
     void onWorkerProgress(int filesDone, int filesTotal, double audioSec);
     void onWorkerFileResult(QString path, bool ok, int segments, QString err);
     void onWorkerFinished(int ok, int failed, int cancelled, double wallSec);

@@ -18,6 +18,7 @@ public slots:
     void requestCancel(); // thread-safe: direct atomic store, callable from any thread
 
 signals:
+    void started(QString provider, int filesTotal);
     void progress(int filesDone, int filesTotal, double audioSec);
     void fileResult(QString path, bool ok, int segments, QString err);
     void finished(int ok, int failed, int cancelled, double wallSec);

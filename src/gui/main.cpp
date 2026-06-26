@@ -37,7 +37,7 @@ int main(int argc, char** argv)
             w.run(
                 QStringList{ QString::fromUtf8(argv[2]) },  // Fix 4: UTF-8 for consistency
                 QStringLiteral("build/gui_selftest"),
-                QStringLiteral("cpu"),
+                QStringLiteral("auto"),
                 true, true, true, true
             );
         });
@@ -88,7 +88,7 @@ int main(int argc, char** argv)
             Qt::QueuedConnection,
             Q_ARG(QStringList, inputs),
             Q_ARG(QString, QStringLiteral("build/gui_selftest_cancel")),
-            Q_ARG(QString, QStringLiteral("cpu")),
+            Q_ARG(QString, QStringLiteral("auto")),
             Q_ARG(bool, true),
             Q_ARG(bool, false),
             Q_ARG(bool, false),
