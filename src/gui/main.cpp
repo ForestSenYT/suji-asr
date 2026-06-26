@@ -24,7 +24,7 @@ int main(int argc, char** argv)
     int wargc = 0;
     LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
     const QString selfArg2 = (wargv && wargc >= 3) ? QString::fromWCharArray(wargv[2])
-                           : (argc >= 3 ? selfArg2 : QString());
+                           : (argc >= 3 ? QString::fromUtf8(argv[2]) : QString());
     // ------------------------------------------------------------------
     // Headless self-test: --selftest <wavfile>
     // Verifies the EngineWorker pipeline without a GUI / platform plugin.
