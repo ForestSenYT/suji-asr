@@ -50,10 +50,14 @@ Source: "{#SrcRel}\suji_batch.exe"; DestDir: "{app}"; Flags: ignoreversion
 ;     CUDA 运行时由 scripts\build_installer.ps1 预先从 vendor\cuda-redist\dll 拷入 build\Release。
 ;     仅排除未使用的 TensorRT provider。 ---
 Source: "{#SrcRel}\*.dll"; DestDir: "{app}"; Flags: ignoreversion; Excludes: "onnxruntime_providers_tensorrt.dll"
-; --- Qt 平台/样式/tls 插件 (windeployqt 产出) ---
-Source: "{#SrcRel}\platforms\*"; DestDir: "{app}\platforms"; Flags: ignoreversion recursesubdirs
-Source: "{#SrcRel}\styles\*";    DestDir: "{app}\styles";    Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SrcRel}\tls\*";       DestDir: "{app}\tls";       Flags: ignoreversion recursesubdirs createallsubdirs
+; --- Qt 插件 (windeployqt 产出): 平台/样式/tls + 图片格式/图标引擎/通用/网络信息 ---
+Source: "{#SrcRel}\platforms\*";          DestDir: "{app}\platforms";          Flags: ignoreversion recursesubdirs
+Source: "{#SrcRel}\styles\*";             DestDir: "{app}\styles";             Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcRel}\tls\*";                DestDir: "{app}\tls";                Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcRel}\imageformats\*";       DestDir: "{app}\imageformats";       Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcRel}\iconengines\*";        DestDir: "{app}\iconengines";        Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcRel}\generic\*";            DestDir: "{app}\generic";            Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SrcRel}\networkinformation\*"; DestDir: "{app}\networkinformation"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; --- ffmpeg + ffprobe (app_dir()/ffmpeg.exe, app_dir()/ffprobe.exe) ---
 Source: "{#SrcVendor}\ffmpeg-master-latest-win64-lgpl\bin\ffmpeg.exe";  DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SrcVendor}\ffmpeg-master-latest-win64-lgpl\bin\ffprobe.exe"; DestDir: "{app}"; Flags: ignoreversion

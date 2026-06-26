@@ -27,6 +27,29 @@ if (Test-Path $cudaDir) {
   Write-Warning "未找到 CUDA 运行时 ($cudaDir) — 安装包将不含 CUDA,目标机只能用 CPU。"
 }
 
+Write-Host "2c) 拷入 VC++ 运行时 DLL(MSVCP140/VCRUNTIME140…;干净机即使没装 VC++ Redist 也能启动,CUDA EP 才能加载)..."
+$crt = @("${env:ProgramFiles}\Microsoft Visual Studio", "${env:ProgramFiles(x86)}\Microsoft Visual Studio") |
+       ForEach-Object { Get-ChildItem -Directory (Join-Path $_ "*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT") -ErrorAction SilentlyContinue } |
+       Sort-Object FullName | Select-Object -Last 1
+if ($crt) {
+  Copy-Item (Join-Path $crt.FullName "*.dll") (Join-Path $ROOT "build\Release") -Force
+  Write-Host "   已拷入 VC++ 运行时: $($crt.FullName)"
+} else {
+  throw "未找到 VC++ Redist CRT 目录 (Microsoft.VC*.CRT)。需装 Visual Studio,或手动把 msvcp140.dll / vcruntime140.dll / vcruntime140_1.dll 拷到 build\Release。"
+}
+
+Write-Host "2d) 校验关键运行时齐全(缺则中止,绝不打出半成品包)..."
+$rel = Join-Path $ROOT "build\Release"
+$need = @("suji_gui.exe","suji_batch.exe","suji_cli.exe",
+          "onnxruntime.dll","onnxruntime_providers_cuda.dll","onnxruntime_providers_shared.dll",
+          "sherpa-onnx-c-api.dll","msvcp140.dll","vcruntime140.dll","vcruntime140_1.dll",
+          "Qt6Core.dll","Qt6Gui.dll","Qt6Widgets.dll")
+$missing = $need | Where-Object { -not (Test-Path (Join-Path $rel $_)) }
+if ($missing) { throw "build\Release 缺少必需文件: $($missing -join ', ') — 中止打包。" }
+if (-not (Test-Path (Join-Path $rel "platforms\qwindows.dll"))) { throw "缺少 Qt 平台插件 platforms\qwindows.dll(windeployqt 未产出?)— 中止。" }
+if (-not (Get-ChildItem (Join-Path $rel "cudart64_*.dll") -ErrorAction SilentlyContinue)) { throw "缺少 CUDA 运行时 cudart64_*.dll — GPU 路径会失败,中止。" }
+Write-Host "   ✓ 关键文件齐全(exe / onnxruntime+CUDA provider / sherpa / VC++ 运行时 / Qt / 平台插件 / CUDA 运行时)"
+
 Write-Host "3) ISCC 编译安装包..."
 if ($Iscc -eq "") {
   foreach ($c in @("F:\InnoSetup\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "${env:ProgramFiles}\Inno Setup 6\ISCC.exe")) {
