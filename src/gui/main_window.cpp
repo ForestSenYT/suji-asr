@@ -187,6 +187,8 @@ MainWindow::MainWindow(QWidget* parent)
     m_progress = new QProgressBar(bottomWidget);
     m_progress->setRange(0, 100);
     m_progress->setValue(0);
+    m_progress->setTextVisible(true);
+    m_progress->setFormat(QStringLiteral("%p%"));
     m_statusLabel = new QLabel(tr("就绪"), bottomWidget);
     m_statusLabel->setMinimumWidth(260);
     progressRow->addWidget(m_progress, /*stretch=*/1);
@@ -358,8 +360,10 @@ void MainWindow::onWorkerStarted(QString provider, int filesTotal)
         if (m_model->item(r, ColStatus)->text() == tr("待处理"))
             setRowStatus(r, tr("处理中"));
     }
-    m_progress->setRange(0, 100);
-    m_progress->setValue(0);
+    // Busy/indeterminate during init+decode (no measurable % yet) so the bar
+    // animates instead of sitting at a dead 0%. onWorkerProgress switches it
+    // to a real percentage on the first transcription output.
+    m_progress->setRange(0, 0);
 }
 
 void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec)
@@ -371,9 +375,15 @@ void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec
     int pct = (totalAudioSec > 0.5)
               ? std::min(99, static_cast<int>(100.0 * audioSec / totalAudioSec))
               : 0;
+    // Leave busy/indeterminate mode on the first real progress, then show %.
+    if (m_progress->maximum() == 0)
+        m_progress->setRange(0, 100);
     m_progress->setValue(pct);
 
-    setStatusText(tr("处理中 %1/%2  %3 倍速  (已转写 %4 秒)")
+    // Percentage in the status label too — guaranteed visible regardless of bar style.
+    const QString pctStr = QString::number(pct) + QStringLiteral("%");
+    setStatusText(tr("处理中 %1  %2/%3  %4 倍速  (已转写 %5 秒)")
+        .arg(pctStr)
         .arg(filesDone)
         .arg(filesTotal)
         .arg(throughput, 0, 'f', 1)
