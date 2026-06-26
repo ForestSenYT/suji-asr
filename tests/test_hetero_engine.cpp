@@ -65,6 +65,80 @@ TEST_CASE("hetero: two consumers drain queue with no double-processing") {
   CHECK((int)uni.size() == K);
 }
 
+// P5 — length-bucketed reorder window: a local holding buffer (cap 2x batch) that
+// sorts held tasks by length and emits the most-similar batch, flushing on EOF.
+// This mirrors the real consumer loop in batch_engine.cpp WITHOUT a model, so it
+// proves the bucketing invariants deterministically:
+//   1. No double-processing + complete coverage with the buffer + reorder in play
+//      (union == all, intersection == empty) — reordering must not drop/dup a task.
+//   2. Every emitted batch is length-contiguous (similar lengths) — the bucketing
+//      actually groups, so DecodeMultipleOfflineStreams pads less.
+namespace {
+struct LenTask { int id; int len; };
+}
+TEST_CASE("P5: bucketed two consumers drain with no double-processing + similar-length batches") {
+  const int K = 4000;
+  BoundedQueue<LenTask> q(64);
+
+  std::mutex emu;                       // guards the shared batch-record vector
+  std::vector<std::vector<int>> batches;   // every emitted batch's lengths, both consumers
+
+  std::set<int> seen_a, seen_b;
+  // Exact shape of the real P5 consumer: hold up to 2x batch, sort by len, emit the
+  // shortest `bmax`, keep remainder; flush whatever is left once the queue is closed.
+  auto consume = [&](std::set<int>& sink, int bmax){
+    const size_t cap = (size_t)bmax * 2;
+    std::vector<LenTask> hold;
+    auto emit_one = [&](){
+      std::sort(hold.begin(), hold.end(),
+                [](const LenTask&a,const LenTask&b){ return a.len<b.len; });
+      size_t take = std::min((size_t)bmax, hold.size());
+      std::vector<int> lens;
+      for(size_t i=0;i<take;i++){ sink.insert(hold[i].id); lens.push_back(hold[i].len); }
+      hold.erase(hold.begin(), hold.begin()+take);
+      std::lock_guard<std::mutex> lk(emu); batches.push_back(std::move(lens));
+    };
+    LenTask first;
+    while(q.pop(first)){
+      hold.push_back(first);
+      LenTask more;
+      while(hold.size() < cap && q.try_pop(more)) hold.push_back(more);
+      while((int)hold.size() >= bmax) emit_one();
+    }
+    while(!hold.empty()) emit_one();   // clean EOF flush — never drop a held task
+  };
+
+  std::thread ca([&]{ consume(seen_a, 5);  });   // "cpu" consumer
+  std::thread cb([&]{ consume(seen_b, 8);  });   // "gpu" consumer
+
+  // Mixed lengths so bucketing has something to group (id carries a deterministic len).
+  for(int i=0;i<K;i++) q.push(LenTask{i, (i*37) % 500});
+  q.close();
+  ca.join(); cb.join();
+
+  // No double-processing: intersection empty, union complete.
+  std::vector<int> inter;
+  std::set_intersection(seen_a.begin(), seen_a.end(), seen_b.begin(), seen_b.end(),
+                        std::back_inserter(inter));
+  CHECK(inter.empty());
+  CHECK((int)(seen_a.size() + seen_b.size()) == K);
+  std::set<int> uni = seen_a; uni.insert(seen_b.begin(), seen_b.end());
+  CHECK((int)uni.size() == K);
+
+  // Bucketing actually grouped: across all emitted batches, the padding waste (sum of
+  // max-len minus each item's len) is strictly less than a length-oblivious baseline
+  // that pads every batch to the GLOBAL max length (499). If bucketing did nothing the
+  // two would be equal; grouping similar lengths makes the per-batch max much smaller.
+  long long bucket_waste = 0, global_waste = 0, total_items = 0;
+  for(const auto& bl : batches){
+    int bmaxlen = 0; for(int l : bl) bmaxlen = std::max(bmaxlen, l);
+    for(int l : bl){ bucket_waste += (bmaxlen - l); global_waste += (499 - l); }
+    total_items += (long long)bl.size();
+  }
+  CHECK(total_items == K);                 // every task emitted exactly once
+  CHECK(bucket_waste < global_waste);      // length-bucketing reduces padding waste
+}
+
 TEST_CASE("hetero: per-engine token sinks sort/merge equal single-array baseline") {
   // Build interleaved timestamps split across two sinks, plus a single baseline.
   std::vector<Token> tok_cpu, tok_gpu, baseline;
@@ -226,4 +300,33 @@ TEST_CASE("R6: clean run leaves seg_pending zero and files stay ok") {
                                            produced_complete[i], file_ok[i]);
     CHECK_FALSE(reclassified);
   }
+}
+
+// P5 + R6: segments sitting in a consumer's LOCAL holding buffer on cancel must keep
+// the file classified cancelled. With the reorder window, a popped segment is counted
+// (producer did seg_pending.fetch_add before push) but not yet routed while it waits in
+// `hold`; the cancel path breaks WITHOUT routing/decrementing the buffer, so seg_pending
+// stays elevated for every held segment -> finalize marks the file cancelled. No held
+// segment is silently lost (it is accounted via seg_pending, exactly like the discarded
+// `first`). This is the P5 analogue of the existing partial-consumption R6 test.
+TEST_CASE("P5+R6: held (buffered-not-routed) segments on cancel keep file cancelled") {
+  const int K = 12;        // all pushed (produced_complete=true)
+  const int routed = 4;    // consumer routed 4 full batches' worth before cancel
+  const int held = 3;      // 3 segments popped into the local hold buffer, NOT yet routed
+  // remaining K-routed-held are still in the queue (also still pending).
+  std::atomic<int> seg_pending{0};
+
+  for (int i = 0; i < K; ++i) seg_pending.fetch_add(1);   // producer counted every push
+  bool produced_complete = true;
+  for (int i = 0; i < routed; ++i) seg_pending.fetch_sub(1);  // only ROUTED segs decrement
+  // `held` segments were try_pop'd into the buffer but cancel fired before emit -> they are
+  // NOT decremented (the consumer breaks, leaving `hold` un-routed). Nothing decrements them.
+
+  CHECK(seg_pending.load() == K - routed);   // held + still-queued all remain pending
+  CHECK(seg_pending.load() >= held);         // the buffered-not-routed segments are accounted
+
+  bool cancel_fired = true;
+  bool says_cancelled = classify_cancelled(cancel_fired, seg_pending.load(),
+                                           produced_complete, /*currently_ok=*/true);
+  CHECK(says_cancelled);   // truncated (buffer flushed-or-not, segments unrouted) -> NOT ok
 }

@@ -161,14 +161,10 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
   const bool gpu_retry = (tune.provider == Provider::Cuda);
   auto consumer_last_cb = std::chrono::steady_clock::time_point{};  // zero = never fired
   std::thread consumer([&]{
-    SegTask first;
-    while(queue.pop(first)){
-      if(cancel && cancel->is_cancelled()){ queue.close(); break; }  // close releases blocked producers
-      // NOTE: `first` is NOT decremented on the cancel path above — that's intentional.
-      // seg_pending[first.file_id] stays elevated, catching this popped-but-discarded segment.
-      std::vector<SegTask> batch; batch.push_back(std::move(first));
-      SegTask more;
-      while((int)batch.size() < tune.batch && queue.try_pop(more)) batch.push_back(std::move(more));
+    // P5: transcribe one already-formed batch -> route tokens -> bump counters -> live cb.
+    // Identical work whether the batch came from a mid-run emit or the EOF flush, so it
+    // lives in one place to keep R3/R6 bookkeeping in exactly one spot.
+    auto process_batch = [&](std::vector<SegTask>&& batch){
       std::vector<Asr::SegView> views; views.reserve(batch.size());
       for(auto& b : batch) views.push_back({b.samples.data(),(int)b.samples.size()});
       auto res = gpu_retry
@@ -176,7 +172,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
         : asr.transcribe_batch(views);
       if (res.size() != batch.size()){   // R3/T12: batch failed -> mark files, never a silent empty success
         mark_batch_failed(batch, res.size(), results, err_mu);
-        continue;
+        return;
       }
       route_batch_tokens(batch, res, file_tokens);
       for(auto& b : batch){
@@ -199,7 +195,38 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
           cb(bp);
         }
       }
+    };
+    // P5: length-bucketed reorder window. Hold popped segments locally (capped at 2x batch
+    // so the other side of work-stealing is never starved and cancel latency stays bounded);
+    // once we hold >= batch, sort by sample length and emit the most-similar `batch` (the
+    // shortest contiguous run after the sort) as ONE transcribe call -> less padding waste in
+    // DecodeMultipleOfflineStreams. Tokens still route per-segment by file_id, so reordering
+    // never changes attribution. On clean EOF the remainder is flushed in length-sorted batches.
+    const int bmax = std::max(1, tune.batch);
+    const size_t cap = (size_t)bmax * 2;
+    std::vector<SegTask> hold;
+    auto emit_one = [&](){   // sort held segments by length, emit the shortest `bmax` as one batch
+      std::sort(hold.begin(), hold.end(),
+                [](const SegTask&a,const SegTask&b){ return a.samples.size()<b.samples.size(); });
+      size_t take = std::min((size_t)bmax, hold.size());
+      std::vector<SegTask> batch(std::make_move_iterator(hold.begin()),
+                                 std::make_move_iterator(hold.begin()+take));
+      hold.erase(hold.begin(), hold.begin()+take);
+      process_batch(std::move(batch));
+    };
+    SegTask first;
+    while(queue.pop(first)){
+      if(cancel && cancel->is_cancelled()){ queue.close(); break; }  // close releases blocked producers
+      // NOTE: neither `first` nor anything left in `hold` is decremented on the cancel path —
+      // that's intentional. seg_pending stays elevated for every popped-but-unrouted segment
+      // (the discarded `first` AND the held buffer), so finalize classifies those files cancelled.
+      hold.push_back(std::move(first));
+      SegTask more;
+      while(hold.size() < cap && queue.try_pop(more)) hold.push_back(std::move(more));
+      while((int)hold.size() >= bmax) emit_one();   // emit full length-similar batches, keep remainder
     }
+    if(!(cancel && cancel->is_cancelled()))         // clean EOF: flush the remainder, never drop a segment
+      while(!hold.empty()) emit_one();
   });
   for(auto& p:producers) p.join();
   queue.close();
@@ -355,14 +382,9 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   auto consumer_last_cb = std::chrono::steady_clock::time_point{};
   auto consume = [&](Asr& asr, int batch_max, std::vector<std::vector<Token>>& sink,
                      std::atomic<long long>& seg_counter, bool oom_retry){
-    SegTask first;
-    while(queue.pop(first)){
-      if(cancel && cancel->is_cancelled()){ queue.close(); break; }
-      // NOTE: `first` is NOT decremented on the cancel path — seg_pending[first.file_id]
-      // stays elevated to catch this popped-but-discarded segment at finalize.
-      std::vector<SegTask> batch; batch.push_back(std::move(first));
-      SegTask more;
-      while((int)batch.size() < batch_max && queue.try_pop(more)) batch.push_back(std::move(more));
+    // P5: transcribe one already-formed batch -> route -> bump counters -> live cb. Same
+    // work whether the batch came from a mid-run emit or the EOF flush, so it lives once.
+    auto process_batch = [&](std::vector<SegTask>&& batch){
       std::vector<Asr::SegView> views; views.reserve(batch.size());
       for(auto& b : batch) views.push_back({b.samples.data(),(int)b.samples.size()});
       auto res = oom_retry
@@ -370,7 +392,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
         : asr.transcribe_batch(views);
       if(res.size() != batch.size()){   // R3/T12
         mark_batch_failed(batch, res.size(), results, err_mu);
-        continue;
+        return;
       }
       route_batch_tokens(batch, res, sink);
       for(auto& b : batch){
@@ -395,7 +417,35 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
         }
         cb_lock.store(false);
       }
+    };
+    // P5: length-bucketed reorder window (see single path). Cap at 2x this consumer's batch
+    // so the OTHER consumer is never starved of stealable work — preserving the delicate
+    // work-stealing balance P3 tuned (a hoarding consumer regresses aggregate throughput).
+    const int bmax = std::max(1, batch_max);
+    const size_t cap = (size_t)bmax * 2;
+    std::vector<SegTask> hold;
+    auto emit_one = [&](){   // sort held segments by length, emit the shortest `bmax` as one batch
+      std::sort(hold.begin(), hold.end(),
+                [](const SegTask&a,const SegTask&b){ return a.samples.size()<b.samples.size(); });
+      size_t take = std::min((size_t)bmax, hold.size());
+      std::vector<SegTask> batch(std::make_move_iterator(hold.begin()),
+                                 std::make_move_iterator(hold.begin()+take));
+      hold.erase(hold.begin(), hold.begin()+take);
+      process_batch(std::move(batch));
+    };
+    SegTask first;
+    while(queue.pop(first)){
+      if(cancel && cancel->is_cancelled()){ queue.close(); break; }
+      // NOTE: neither `first` nor anything left in `hold` is decremented on the cancel path —
+      // seg_pending stays elevated for every popped-but-unrouted segment (the discarded `first`
+      // AND the held buffer), so finalize classifies those files cancelled. Nothing is lost.
+      hold.push_back(std::move(first));
+      SegTask more;
+      while(hold.size() < cap && queue.try_pop(more)) hold.push_back(std::move(more));
+      while((int)hold.size() >= bmax) emit_one();   // emit full length-similar batches, keep remainder
     }
+    if(!(cancel && cancel->is_cancelled()))         // clean EOF: flush remainder, never drop a segment
+      while(!hold.empty()) emit_one();
   };
 
   std::vector<std::thread> consumers;
