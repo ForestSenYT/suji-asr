@@ -18,6 +18,14 @@ namespace suji {
 namespace {
 struct SegTask { int file_id; int64_t start_sample; std::vector<float> samples; };
 
+// UTF-8-safe basename (no extension strip): last component after the last '/' or '\'.
+// Operates on raw UTF-8 bytes (ASCII-transparent) so Chinese filenames survive.
+// std::filesystem narrow path would re-interpret UTF-8 as the system ANSI codepage.
+static std::string basename_utf8(const std::string& p) {
+    size_t slash = p.find_last_of("/\\");
+    return (slash == std::string::npos) ? p : p.substr(slash + 1);
+}
+
 // Route one transcribe_batch result into a per-file token sink (no global lock;
 // each consumer owns its own sink). tk.start = seg start (s) + local timestamp.
 void route_batch_tokens(const std::vector<SegTask>& batch,
@@ -113,7 +121,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
         if(cancel && cancel->is_cancelled()) break;   // stop taking new files on cancel
         if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
         AudioBuffer ab; std::string err;
-        log_info("解码: " + inputs[fi]);   // G14: phase visibility — decode begins (silent window before)
+        log_info("解码: " + basename_utf8(inputs[fi]));   // C1: decode begins
         if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err, cancel)){
           std::lock_guard<std::mutex> lk(err_mu);
           results[fi].ok=false;
@@ -143,7 +151,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
           ++produced;
           return true;
         }, cancel);
-        log_info("切分语音: " + inputs[fi] + " (" + std::to_string(produced) + " 段)");  // G14: VAD done
+        log_info("切分完成: " + basename_utf8(inputs[fi]) + " (" + std::to_string(produced) + " 段)");  // C1: VAD done
         // R6: this file's production is complete only if we pushed every segment.
         { std::lock_guard<std::mutex> lk(err_mu); produced_complete[fi]=1; }
       }
@@ -218,6 +226,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
       tr.segments = merge_tokens(toks, cfg.merge_gap, cfg.merge_max_dur);
       for(auto& seg : tr.segments){ seg.text = punct.add(seg.text); tr.full_text += seg.text; }
       results[i].transcript = std::move(tr);
+      log_info("完成: " + basename_utf8(inputs[i]) + " (" + std::to_string(results[i].transcript.segments.size()) + " 段)");  // C1
     }
     files_done++;                                  // count every file (ok or failed)
     if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; bp.total_audio_decoded=(double)decoded_samples.load()/16000.0; bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load(); fill_files(bp); cb(bp); }
@@ -308,7 +317,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
         if(cancel && cancel->is_cancelled()) break;
         if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
         AudioBuffer ab; std::string err;
-        log_info("解码: " + inputs[fi]);   // G14: phase visibility — decode begins (silent window before)
+        log_info("解码: " + basename_utf8(inputs[fi]));   // C1: decode begins
         if(!decode_to_pcm(cfg.ffmpeg_path, inputs[fi], ab, err, cancel)){
           std::lock_guard<std::mutex> lk(err_mu);
           results[fi].ok=false;
@@ -336,7 +345,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
           ++produced;
           return true;
         }, cancel);
-        log_info("切分语音: " + inputs[fi] + " (" + std::to_string(produced) + " 段)");  // G14: VAD done
+        log_info("切分完成: " + basename_utf8(inputs[fi]) + " (" + std::to_string(produced) + " 段)");  // C1: VAD done
         { std::lock_guard<std::mutex> lk(err_mu); produced_complete[fi]=1; }
       }
     });
@@ -435,6 +444,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
       tr.segments = merge_tokens(toks, cfg.merge_gap, cfg.merge_max_dur);
       for(auto& seg : tr.segments){ seg.text = punct.add(seg.text); tr.full_text += seg.text; }
       results[i].transcript = std::move(tr);
+      log_info("完成: " + basename_utf8(inputs[i]) + " (" + std::to_string(results[i].transcript.segments.size()) + " 段)");  // C1
     }
     files_done++;
     if(cb){ BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load(); bp.audio_seconds_done=(double)samples_done.load()/16000.0; bp.total_audio_decoded=(double)decoded_samples.load()/16000.0; bp.cpu_segs=cpu_segs.load(); bp.gpu_segs=gpu_segs.load(); bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load(); fill_files(bp); cb(bp); }
