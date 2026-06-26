@@ -25,6 +25,11 @@ signals:
     void progress(int filesDone, int filesTotal, double audioSec, double totalAudioSec,
                   long long cpuSegs, long long gpuSegs,
                   long long segsDone, long long segsTotal);
+    // PER-FILE progress ("每个视频分开"): one emission per file per progress callback,
+    // keyed by the original input PATH. The engine's file_index ≠ GUI table row when
+    // resume filters files, so the worker maps index→path before emitting. percent = 0
+    // when segsTotal == 0 (file still decoding/VAD with nothing queued yet).
+    void fileProgress(QString path, int percent, int segsDone, int segsTotal);
     void fileResult(QString path, bool ok, int segments, QString err);
     void finished(int ok, int failed, int cancelled, double wallSec);
 

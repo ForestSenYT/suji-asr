@@ -204,8 +204,9 @@ int main(int argc, char** argv)
         QTimer poll;
         QObject::connect(&poll, &QTimer::timeout, [&]() {
             const QString rs = win.testRowStatus(0);
-            std::printf("[t=%2ds] row0=\"%s\" prog=%d status=\"%s\"\n",
+            std::printf("[t=%2ds] row0=\"%s\" rowProg=%d%% globalProg=%d status=\"%s\"\n",
                         ticks, rs.toUtf8().constData(),
+                        win.testRowProgress(0),
                         win.testProgressValue(),
                         win.testStatusText().toUtf8().constData());
             std::fflush(stdout);

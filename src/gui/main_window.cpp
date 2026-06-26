@@ -3,6 +3,7 @@
 #include "core/log.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -27,6 +28,9 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardItemModel>
+#include <QStyledItemDelegate>
+#include <QStyleOptionProgressBar>
+#include <QPainter>
 #include <QTableView>
 #include <QThread>
 #include <QTimer>
@@ -63,9 +67,49 @@ bool MainWindow::isMediaFile(const QString& path)
 }
 
 // ---------------------------------------------------------------------------
-// Column indices
+// Column indices.  进度 (per-file progress bar) sits right after 状态 so the
+// user reads file -> status -> live bar left-to-right ("每个视频分开").
 // ---------------------------------------------------------------------------
-enum Col { ColFile = 0, ColStatus = 1, ColSegs = 2, ColErr = 3, ColCount = 4 };
+enum Col { ColFile = 0, ColStatus = 1, ColProgress = 2, ColSegs = 3, ColErr = 4, ColCount = 5 };
+
+// Per-row progress percent is stored on the 进度 cell's item via this role.
+// -1 / absent = not started (the delegate paints an empty track).
+static constexpr int ProgressRole = Qt::UserRole + 1;
+
+// ---------------------------------------------------------------------------
+// ProgressBarDelegate — paints a horizontal progress bar (with "%" text) in the
+// 进度 column, reflecting the row's ProgressRole value via the platform style.
+// Percent < 0 / unset -> paint nothing but the default cell background.
+// ---------------------------------------------------------------------------
+namespace {
+class ProgressBarDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override
+    {
+        // Let the base class draw selection/alternating-row background first.
+        QStyledItemDelegate::paint(painter, option, index);
+
+        bool ok = false;
+        const int pct = index.data(ProgressRole).toInt(&ok);
+        if (!ok || pct < 0)
+            return;   // not started: leave the (already-painted) empty cell
+
+        QStyleOptionProgressBar bar;
+        bar.rect      = option.rect.adjusted(3, 4, -3, -4);
+        bar.minimum   = 0;
+        bar.maximum   = 100;
+        bar.progress  = std::clamp(pct, 0, 100);
+        bar.text      = QString::number(bar.progress) + QStringLiteral("%");
+        bar.textVisible   = true;
+        bar.textAlignment = Qt::AlignCenter;
+        bar.state     = QStyle::State_Enabled;
+        QApplication::style()->drawControl(QStyle::CE_ProgressBar, &bar, painter);
+    }
+};
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -116,20 +160,24 @@ MainWindow::MainWindow(QWidget* parent)
     // Center: QTableView + model
     // -----------------------------------------------------------------------
     m_model = new QStandardItemModel(0, ColCount, this);
-    m_model->setHorizontalHeaderLabels({tr("文件"), tr("状态"), tr("段数"), tr("错误")});
+    m_model->setHorizontalHeaderLabels({tr("文件"), tr("状态"), tr("进度"), tr("段数"), tr("错误")});
 
     m_table = new QTableView(this);
     m_table->setModel(m_model);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
-    m_table->horizontalHeader()->setSectionResizeMode(ColFile,   QHeaderView::Stretch);
-    m_table->horizontalHeader()->setSectionResizeMode(ColStatus, QHeaderView::Fixed);
-    m_table->horizontalHeader()->setSectionResizeMode(ColSegs,   QHeaderView::Fixed);
-    m_table->horizontalHeader()->setSectionResizeMode(ColErr,    QHeaderView::Fixed);
-    m_table->setColumnWidth(ColStatus, 80);
-    m_table->setColumnWidth(ColSegs,   60);
-    m_table->setColumnWidth(ColErr,    200);
+    // Per-file progress bar delegate on the 进度 column ("每个视频分开").
+    m_table->setItemDelegateForColumn(ColProgress, new ProgressBarDelegate(m_table));
+    m_table->horizontalHeader()->setSectionResizeMode(ColFile,     QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSectionResizeMode(ColStatus,   QHeaderView::Fixed);
+    m_table->horizontalHeader()->setSectionResizeMode(ColProgress, QHeaderView::Fixed);
+    m_table->horizontalHeader()->setSectionResizeMode(ColSegs,     QHeaderView::Fixed);
+    m_table->horizontalHeader()->setSectionResizeMode(ColErr,      QHeaderView::Fixed);
+    m_table->setColumnWidth(ColStatus,   80);
+    m_table->setColumnWidth(ColProgress, 140);
+    m_table->setColumnWidth(ColSegs,     60);
+    m_table->setColumnWidth(ColErr,      200);
     m_table->verticalHeader()->setVisible(false);
     m_table->verticalHeader()->setDefaultSectionSize(27);  // taller rows for readability
 
@@ -254,6 +302,8 @@ MainWindow::MainWindow(QWidget* parent)
             this,    &MainWindow::onWorkerStarted);
     connect(worker_, &EngineWorker::progress,
             this,    &MainWindow::onWorkerProgress);
+    connect(worker_, &EngineWorker::fileProgress,
+            this,    &MainWindow::onFileProgress);
     connect(worker_, &EngineWorker::fileResult,
             this,    &MainWindow::onWorkerFileResult);
     connect(worker_, &EngineWorker::finished,
@@ -355,6 +405,7 @@ void MainWindow::onStart()
     for (int r = 0; r < m_model->rowCount(); ++r) {
         setRowStatus(r, tr("待处理"));
         if (auto* item = m_model->item(r, ColSegs)) item->setText(QString());
+        setRowProgress(r, -1);   // clear per-file progress bar (not started)
         setRowError(r, QString());
     }
     setStatusText(tr("正在初始化…"));
@@ -571,6 +622,35 @@ void MainWindow::onSecondTick()
     renderStatusLine();
 }
 
+// ---------------------------------------------------------------------------
+// PER-FILE progress ("每个视频分开"): the worker emits one fileProgress per file
+// per engine callback, keyed by the original input PATH. Find the matching row
+// (same path lookup as onWorkerFileResult), update its 进度 bar + 段数 cell, and
+// flip 待处理 -> 处理中 on the file's first progress. Final 完成/失败/取消 is set by
+// onWorkerFileResult.
+// ---------------------------------------------------------------------------
+void MainWindow::onFileProgress(QString path, int percent, int segsDone, int segsTotal)
+{
+    const int n = m_model->rowCount();
+    for (int r = 0; r < n; ++r) {
+        if (m_model->item(r, ColFile)->data(Qt::UserRole).toString() != path)
+            continue;
+        setRowProgress(r, percent);
+        // Show this file's own segment count (done/total) once it has segments.
+        if (segsTotal > 0) {
+            if (auto* item = m_model->item(r, ColSegs))
+                item->setText(QString::number(segsDone) + QStringLiteral("/")
+                            + QString::number(segsTotal));
+        }
+        // First progress for a pending file -> 处理中 (final state set by fileResult).
+        if (auto* st = m_model->item(r, ColStatus)) {
+            if (st->text() == tr("待处理"))
+                setRowStatus(r, tr("处理中"));
+        }
+        return;
+    }
+}
+
 void MainWindow::onWorkerFileResult(QString path, bool ok, int segments, QString err)
 {
     // Find the row whose Qt::UserRole data matches the path
@@ -580,6 +660,7 @@ void MainWindow::onWorkerFileResult(QString path, bool ok, int segments, QString
             if (ok) {
                 setRowStatus(r, tr("完成"));
                 setRowSegments(r, segments);
+                setRowProgress(r, 100);   // completed file: fill its per-file bar
                 appendLogLine(QStringLiteral("OK"),
                     tr("完成: %1 (%2 段)").arg(QFileInfo(path).fileName()).arg(segments));
             } else if (err == QStringLiteral("cancelled")) {
@@ -678,10 +759,12 @@ void MainWindow::addInputFile(const QString& path)
 
     auto* itemStatus = new QStandardItem(tr("待处理"));
     itemStatus->setForeground(QBrush(QColor(0x70, 0x73, 0x7d)));  // muted gray
+    auto* itemProg   = new QStandardItem(QString());
+    itemProg->setData(-1, ProgressRole);   // -1 = not started (delegate paints empty track)
     auto* itemSegs   = new QStandardItem(QString());
     auto* itemErr    = new QStandardItem(QString());
 
-    m_model->appendRow({itemFile, itemStatus, itemSegs, itemErr});
+    m_model->appendRow({itemFile, itemStatus, itemProg, itemSegs, itemErr});
 }
 
 void MainWindow::addFolder(const QString& dir)
@@ -796,6 +879,16 @@ void MainWindow::setRowSegments(int row, int segs)
         item->setText(QString::number(segs));
 }
 
+void MainWindow::setRowProgress(int row, int percent)
+{
+    if (auto* item = m_model->item(row, ColProgress)) {
+        item->setData(percent, ProgressRole);
+        // Trigger a repaint of just this cell (the delegate reads ProgressRole).
+        const QModelIndex idx = m_model->index(row, ColProgress);
+        emit m_model->dataChanged(idx, idx, {ProgressRole, Qt::DisplayRole});
+    }
+}
+
 void MainWindow::setRowError(int row, const QString& err)
 {
     if (auto* item = m_model->item(row, ColErr))
@@ -816,6 +909,13 @@ QString MainWindow::testRowStatus(int row) const
     if (auto* item = m_model->item(row, ColStatus))
         return item->text();
     return QString();
+}
+
+int MainWindow::testRowProgress(int row) const
+{
+    if (auto* item = m_model->item(row, ColProgress))
+        return item->data(ProgressRole).toInt();
+    return -1;
 }
 
 QString MainWindow::testStatusText() const

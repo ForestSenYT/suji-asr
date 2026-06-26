@@ -296,9 +296,21 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
 
     auto results = transcribe_batch_files(
         todo, c, tune,
-        [this, totalAudio](const BatchProgress& b) {
+        [this, totalAudio, &todo](const BatchProgress& b) {
             emit progress(b.files_done, b.files_total, b.audio_seconds_done, totalAudio,
                           b.cpu_segs, b.gpu_segs, b.segs_done, b.segs_total);
+            // PER-FILE progress: map each FilePstat.file_index -> the engine-input
+            // PATH (todo[index]; resume already filtered, so todo IS the engine's
+            // inputs vector) and emit one fileProgress per file. QString/int are
+            // registered metatypes, so the queued cross-thread delivery is safe.
+            for (const FilePstat& fp : b.files) {
+                if (fp.file_index < 0 || fp.file_index >= (int)todo.size()) continue;
+                int percent = (fp.segs_total > 0)
+                    ? std::min(100, (int)(100 * fp.segs_done / fp.segs_total))
+                    : 0;
+                emit fileProgress(QString::fromUtf8(todo[fp.file_index].c_str()),
+                                  percent, (int)fp.segs_done, (int)fp.segs_total);
+            }
         },
         &cancel_
     );

@@ -43,6 +43,7 @@ public:
     void setRowStatus(int row, const QString& status);
     void setRowSegments(int row, int segs);
     void setRowError(int row, const QString& err);
+    void setRowProgress(int row, int percent);   // per-file progress bar (-1 = unset)
 
     // Headless test hooks (offscreen --selftest-gui): drive the real interactive path
     void testStart(const QString& file);     // addInputFile + onStart
@@ -50,6 +51,7 @@ public:
     QString testStatusText() const;           // bottom status label text
     QString testLogText() const;             // current log panel text
     int testProgressValue() const { return m_progress ? m_progress->value() : -1; }
+    int testRowProgress(int row) const;       // current per-file progress % (-1 = unset)
     void testCancel();                        // invoke the real onCancel()
 
 public slots:
@@ -65,6 +67,9 @@ public slots:
     void onWorkerProgress(int filesDone, int filesTotal, double audioSec, double totalAudioSec,
                           long long cpuSegs, long long gpuSegs,
                           long long segsDone, long long segsTotal);
+    // PER-FILE progress: find the row by matching the stored path (Qt::UserRole on the
+    // 文件 column, like onWorkerFileResult) and set its 进度/段数 cells.
+    void onFileProgress(QString path, int percent, int segsDone, int segsTotal);
     void onWorkerFileResult(QString path, bool ok, int segments, QString err);
     void onWorkerFinished(int ok, int failed, int cancelled, double wallSec);
 
