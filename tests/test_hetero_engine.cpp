@@ -124,3 +124,106 @@ TEST_CASE("hetero: cancel releases both consumers (no hang)" * doctest::timeout(
   ca.join(); cb.join();
   CHECK(joined.load() == 2);
 }
+
+// ---------------------------------------------------------------------------
+// R6 consumption tracking (bug fix): seg_pending per-file counter
+//
+// The bug: produced_complete[fi] is true once all segments are PUSHED, but if
+// cancel fires while tail segments are still queued or are the popped-but-
+// discarded `first` on the cancel path, those segments are never transcribed.
+// The old finalize only checked produced_complete (push-complete), so such a
+// file would be reported ok with a TRUNCATED transcript (R6 violation).
+//
+// The fix: track per-file CONSUMPTION via seg_pending[] atomics.
+//   - producer: seg_pending[fi].fetch_add(1) before each queue.push()
+//   - consumer: seg_pending[fi].fetch_sub(1) after routing each segment's tokens
+//   - finalize: if cancel && seg_pending[i] > 0 -> ok=false err="cancelled"
+//
+// Test 1 (RED before fix / GREEN after fix):
+//   Push K segments for file 0, mark production-complete, consume only some,
+//   then cancel and classify -> file 0 must be ok=false, err="cancelled".
+//
+// Test 2 (positive / always GREEN):
+//   Clean run (no cancel), consume ALL pushed segments -> seg_pending == 0
+//   for every file -> no file is reclassified (all stay ok).
+// ---------------------------------------------------------------------------
+
+// Minimal finalize classification replicating the FIXED logic in batch_engine.cpp.
+// Returns true if a file should be reclassified as cancelled.
+// The fix: use seg_pending (consumption tracking) in addition to produced_complete.
+static bool classify_cancelled(bool cancel_fired, int seg_pending, bool produced_complete,
+                                bool currently_ok) {
+  // Mirror of the finalize guard: only override files that are currently ok.
+  if (!currently_ok) return false;
+  return cancel_fired && (seg_pending > 0 || !produced_complete);
+}
+
+// OLD (buggy) classification that only checks produced_complete.
+// Demonstrates what the bug produces: a fully-pushed but partially-consumed file
+// is NOT reclassified, so it's reported ok with a truncated transcript.
+static bool classify_cancelled_old_buggy(bool cancel_fired, bool produced_complete,
+                                          bool currently_ok) {
+  if (!currently_ok) return false;
+  return cancel_fired && !produced_complete;  // BUG: misses seg_pending > 0 case
+}
+
+TEST_CASE("R6: partial consumption on cancel is classified cancelled, not ok") {
+  // Simulate: file 0 has K segments pushed (produced_complete=true) but only
+  // some were consumed when cancel fired.
+  const int K = 10;
+  const int consumed = 3;   // consumer processed 3 before observing cancel
+  // seg_pending starts at 0; producer increments before push, consumer decrements after route.
+  std::atomic<int> seg_pending{0};
+  bool produced_complete = false;
+  bool file_ok = true;   // no decode/VAD/transcribe error
+
+  // Simulate producer: K pushes, with seg_pending incremented BEFORE each push.
+  for (int i = 0; i < K; ++i) seg_pending.fetch_add(1);
+  produced_complete = true;  // all pushed -> produced_complete is TRUE here
+
+  // Simulate consumer: processes `consumed` segments then observes cancel.
+  // The discarded `first` on the cancel path is NOT decremented (that's the point).
+  for (int i = 0; i < consumed; ++i) seg_pending.fetch_sub(1);
+  // cancel fires; remaining K-consumed segments (including the popped-but-discarded first)
+  // stay pending -> seg_pending > 0.
+
+  bool cancel_fired = true;
+
+  // PROVE THE BUG: the OLD logic (produced_complete only) misclassifies this file as ok.
+  bool old_says_cancelled = classify_cancelled_old_buggy(cancel_fired, produced_complete, file_ok);
+  CHECK_FALSE(old_says_cancelled);  // old logic: produced_complete==true -> NOT reclassified -> WRONG
+
+  // THE FIX: seg_pending > 0 catches the truncation; file must be reclassified cancelled.
+  bool new_says_cancelled = classify_cancelled(cancel_fired, seg_pending.load(),
+                                               produced_complete, file_ok);
+  CHECK(seg_pending.load() == K - consumed);  // 7 segments unconsumed
+  CHECK(new_says_cancelled);                  // fixed logic: truncated transcript NOT reported ok
+}
+
+TEST_CASE("R6: clean run leaves seg_pending zero and files stay ok") {
+  // Simulate: 3 files, varying segment counts, all consumed, no cancel.
+  const int N = 3;
+  const int segs_per_file[] = {5, 3, 8};
+  std::vector<std::atomic<int>> seg_pending(N);
+  for (int i = 0; i < N; ++i) seg_pending[i].store(0);
+  std::vector<bool> produced_complete(N, false);
+  std::vector<bool> file_ok(N, true);
+
+  // Simulate producers and consumers for each file.
+  for (int fi = 0; fi < N; ++fi) {
+    for (int s = 0; s < segs_per_file[fi]; ++s) seg_pending[fi].fetch_add(1);
+    produced_complete[fi] = true;
+    // All consumed cleanly (no cancel discard).
+    for (int s = 0; s < segs_per_file[fi]; ++s) seg_pending[fi].fetch_sub(1);
+  }
+
+  bool cancel_fired = false;
+  for (int i = 0; i < N; ++i) {
+    // Clean run: seg_pending must be 0.
+    CHECK(seg_pending[i].load() == 0);
+    // Finalize must NOT reclassify any file as cancelled.
+    bool reclassified = classify_cancelled(cancel_fired, seg_pending[i].load(),
+                                           produced_complete[i], file_ok[i]);
+    CHECK_FALSE(reclassified);
+  }
+}

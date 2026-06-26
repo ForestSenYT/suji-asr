@@ -66,6 +66,12 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
   BoundedQueue<SegTask> queue((size_t)std::max(4, tune.batch*4));
   std::vector<std::vector<Token>> file_tokens(N);   // consumer-only (no lock)
   std::vector<char> produced_complete(N,0);          // R6: set when ALL of a file's segs pushed
+  // R6 fix: per-file pending-segment counter. Incremented by producer BEFORE push,
+  // decremented by consumer AFTER routing tokens. On cancel the discarded `first`
+  // is NOT decremented, so seg_pending[fi] > 0 catches the truncation window that
+  // produced_complete alone misses (produced_complete only tracks push-completion).
+  std::unique_ptr<std::atomic<int>[]> seg_pending(new std::atomic<int>[N]);
+  for(int i=0;i<N;i++) seg_pending[i].store(0);
   std::mutex err_mu;                                 // guards results[].ok/err + produced_complete
   std::atomic<size_t> next_file{0};
   std::atomic<int> files_done{0};
@@ -93,7 +99,11 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
         Vad vad(cfg);
         if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
         auto segs = vad.segment(ab, cancel);
-        for(auto& s : segs){ SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples); queue.push(std::move(st)); }
+        for(auto& s : segs){
+          seg_pending[fi].fetch_add(1);              // R6 fix: count before push
+          SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples);
+          queue.push(std::move(st));
+        }
         // R6: this file's production is complete only if we pushed every segment.
         { std::lock_guard<std::mutex> lk(err_mu); produced_complete[fi]=1; }
       }
@@ -105,6 +115,8 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
     SegTask first;
     while(queue.pop(first)){
       if(cancel && cancel->is_cancelled()){ queue.close(); break; }  // close releases blocked producers
+      // NOTE: `first` is NOT decremented on the cancel path above — that's intentional.
+      // seg_pending[first.file_id] stays elevated, catching this popped-but-discarded segment.
       std::vector<SegTask> batch; batch.push_back(std::move(first));
       SegTask more;
       while((int)batch.size() < tune.batch && queue.try_pop(more)) batch.push_back(std::move(more));
@@ -116,7 +128,10 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
         continue;
       }
       route_batch_tokens(batch, res, file_tokens);
-      for(auto& b : batch) samples_done += b.samples.size();
+      for(auto& b : batch){
+        samples_done += b.samples.size();
+        seg_pending[b.file_id].fetch_sub(1);         // R6 fix: segment fully consumed
+      }
       // live progress: throttle to ~150 ms so we don't flood the GUI
       if(cb){
         auto now = std::chrono::steady_clock::now();
@@ -137,9 +152,13 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
   // finalize per file (single-threaded): sort tokens by time -> merge -> punctuate
   Punctuator punct(cfg);
   for(int i=0;i<N;i++){
-    // R6: a cancelled file that received some segments but is NOT production-complete
-    // must be reported as cancelled — never present a truncated transcript as ok.
-    if (cancel && cancel->is_cancelled() && results[i].ok && !produced_complete[i]) {
+    // R6 fix: use seg_pending (consumption tracking) in addition to produced_complete.
+    // seg_pending[i] > 0 catches the window where all segs were pushed (produced_complete=1)
+    // but tail segs were still queued or were the popped-but-discarded `first` on cancel.
+    // produced_complete[i]==0 catches the window where pushing itself was interrupted.
+    // Together they cover every truncation scenario; clean runs leave seg_pending==0.
+    if (cancel && cancel->is_cancelled() && results[i].ok &&
+        (seg_pending[i].load() > 0 || !produced_complete[i])) {
       results[i].ok = false; results[i].err = "cancelled";
     }
     if(results[i].ok){
@@ -194,6 +213,11 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   // Two token sinks: each consumer writes ONLY its own (hot path lock-free).
   std::vector<std::vector<Token>> tok_cpu(N), tok_gpu(N);
   std::vector<char> produced_complete(N,0);          // R6
+  // R6 fix: per-file pending-segment counter (same semantics as single path).
+  // Producer increments before push; consumer decrements after routing. On cancel,
+  // the discarded `first` is never decremented -> seg_pending > 0 catches truncation.
+  std::unique_ptr<std::atomic<int>[]> seg_pending(new std::atomic<int>[N]);
+  for(int i=0;i<N;i++) seg_pending[i].store(0);
   std::mutex err_mu;                                 // guards results[] + produced_complete
   std::atomic<size_t> next_file{0};
   std::atomic<int> files_done{0};
@@ -220,7 +244,11 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
         Vad vad(cfg);
         if(!vad.ok()){ std::lock_guard<std::mutex> lk(err_mu); results[fi].ok=false; results[fi].err="VAD init"; continue; }
         auto segs = vad.segment(ab, cancel);
-        for(auto& s : segs){ SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples); queue.push(std::move(st)); }
+        for(auto& s : segs){
+          seg_pending[fi].fetch_add(1);              // R6 fix: count before push
+          SegTask st; st.file_id=(int)fi; st.start_sample=s.start_sample; st.samples=std::move(s.samples);
+          queue.push(std::move(st));
+        }
         { std::lock_guard<std::mutex> lk(err_mu); produced_complete[fi]=1; }
       }
     });
@@ -234,6 +262,8 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
     SegTask first;
     while(queue.pop(first)){
       if(cancel && cancel->is_cancelled()){ queue.close(); break; }
+      // NOTE: `first` is NOT decremented on the cancel path — seg_pending[first.file_id]
+      // stays elevated to catch this popped-but-discarded segment at finalize.
       std::vector<SegTask> batch; batch.push_back(std::move(first));
       SegTask more;
       while((int)batch.size() < batch_max && queue.try_pop(more)) batch.push_back(std::move(more));
@@ -245,7 +275,10 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
         continue;
       }
       route_batch_tokens(batch, res, sink);
-      for(auto& b : batch) samples_done += b.samples.size();
+      for(auto& b : batch){
+        samples_done += b.samples.size();
+        seg_pending[b.file_id].fetch_sub(1);         // R6 fix: segment fully consumed
+      }
       if(cb && !cb_lock.exchange(true)){              // best-effort throttled live cb
         auto now = std::chrono::steady_clock::now();
         if(consumer_last_cb == std::chrono::steady_clock::time_point{} ||
@@ -272,7 +305,12 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   // finalize per file: merge tok_cpu[i] + tok_gpu[i] -> sort -> merge -> punctuate.
   Punctuator punct(cfg);
   for(int i=0;i<N;i++){
-    if (cancel && cancel->is_cancelled() && results[i].ok && !produced_complete[i]) {
+    // R6 fix: seg_pending[i] > 0 catches the truncation window where all segs were
+    // pushed (produced_complete=1) but tail segs are still queued or were the
+    // popped-but-discarded `first`. produced_complete[i]==0 covers the push-interrupted
+    // case. A clean (non-cancelled) run leaves seg_pending[i]==0 for every file.
+    if (cancel && cancel->is_cancelled() && results[i].ok &&
+        (seg_pending[i].load() > 0 || !produced_complete[i])) {
       results[i].ok = false; results[i].err = "cancelled";   // R6: truncated transcript is NOT ok
     }
     if(results[i].ok){
