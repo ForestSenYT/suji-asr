@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
   SetConsoleCP(CP_UTF8);
 #endif
   if (argc < 2) {
-    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--cpu-threads N] [--in-flight N] [--cuda-dll-dir <path>] [--asr-encoder <path> --asr-decoder <path> [--asr-tokens <path>]] [--qwen3-dir <dir>] [--srt-line N] [--resume|--no-resume]");
+    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--cpu-threads N] [--in-flight N] [--cuda-dll-dir <path>] [--asr-encoder <path> --asr-decoder <path> [--asr-tokens <path>]] [--qwen3-dir <dir>] [--hotwords <file>] [--srt-line N] [--resume|--no-resume]");
     return 2;
   }
 
@@ -131,6 +131,9 @@ int main(int argc, char** argv) {
   // Qwen3-ASR model directory. When set, files are auto-discovered inside it and
   // the engine takes the qwen3_asr path (precedence over AED/CTC + auto-fp16-AED).
   std::string qwen3_dir;
+  // --hotwords <file>: proper-noun/domain biasing file (one term per line). Only the
+  // Qwen3 path consumes it (its inline `hotwords` config field); ignored for AED/CTC.
+  std::string hotwords_file;
   std::vector<std::string> inputs;
 
   for (int i = 1; i < argc; ++i) {
@@ -173,6 +176,10 @@ int main(int argc, char** argv) {
     else if (a == "--qwen3-dir"    && i + 1 < argc) {
       qwen3_dir = argv[++i];
       if (!fs::is_directory(qwen3_dir)) { log_err("--qwen3-dir is not a directory: " + qwen3_dir); return 2; }
+    }
+    else if (a == "--hotwords"     && i + 1 < argc) {
+      hotwords_file = argv[++i];
+      if (!fs::exists(hotwords_file)) { log_err("--hotwords file not found: " + hotwords_file); return 2; }
     }
     else if (a == "--srt-line"      && i + 1 < argc) {
       // 0 = no wrap (valid default); positive = max codepoints per line
@@ -223,6 +230,17 @@ int main(int argc, char** argv) {
     c.qwen3_decoder       = dec;
     c.qwen3_tokenizer     = tok;
     log_info("asr: Qwen3-ASR selected (conv=" + conv + " enc=" + enc + " dec=" + dec + " tokenizer=" + tok + ")");
+  }
+
+  // --hotwords: Qwen3-only biasing. The engine reads this file and feeds the terms to
+  // Qwen3's inline `hotwords` config (see asr.cpp). Warn (not fail) if given without
+  // Qwen3 active, since AED/CTC ignore it — the user should know it has no effect.
+  if (!hotwords_file.empty()) {
+    c.hotwords = hotwords_file;
+    if (qwen3_dir.empty())
+      log_err("--hotwords is only used by the Qwen3 path (--qwen3-dir); it will be ignored here");
+    else
+      log_info("hotwords: " + hotwords_file);
   }
 
   // Resume partition: skip already-complete outputs

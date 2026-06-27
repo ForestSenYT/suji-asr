@@ -95,3 +95,16 @@ TEST_CASE("P1: setting AED paths does not disturb asr_model (CTC) field") {
   CHECK(c.asr_model == "ctc.int8.onnx");   // CTC field preserved, just not used
   CHECK(selects_aed(c));
 }
+
+// ---- Qwen3 hotwords: EngineConfig field ----
+
+TEST_CASE("hotwords: EngineConfig.hotwords defaults to empty (no biasing)") {
+  EngineConfig c;
+  CHECK(c.hotwords.empty());
+}
+
+TEST_CASE("hotwords: EngineConfig.hotwords can be set to a file path") {
+  EngineConfig c;
+  c.hotwords = "models/lecture_hotwords_zh.txt";
+  CHECK(c.hotwords == "models/lecture_hotwords_zh.txt");
+}

@@ -29,6 +29,12 @@ struct EngineConfig {
   std::string punct_model;     // CT punct model.int8.onnx
   std::string rule_fsts;       // 可选 ITN fst(空=关)
   std::string rule_fars;       // 可选 ITN far archive (空=关)
+  // Qwen3-ASR hotwords (proper-noun/domain biasing). PATH to a hotwords file
+  // (one term per line; '#' comment lines and blanks ignored). asr.cpp reads the
+  // file and passes the terms as a comma-separated UTF-8 string to the Qwen3
+  // model config's `hotwords` field. Empty = no biasing. Qwen3-only (the global
+  // hotwords_file/hotwords_score path is for transducer/CTC, not the LLM decoder).
+  std::string hotwords;
   Provider provider = Provider::Cpu;
   int num_threads = 4;         // CUDA 时置 1
   // VAD(默认值参考 c-api.h 示例;max_speech 取 20s 抑制超长段)

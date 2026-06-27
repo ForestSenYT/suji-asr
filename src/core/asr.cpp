@@ -1,7 +1,10 @@
 #include "core/asr.h"
+#include "core/log.h"
 #include "sherpa-onnx/c-api/c-api.h"
 #include <cstring>
 #include <string>
+#include <fstream>
+#include <algorithm>
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -18,6 +21,27 @@ static std::wstring widen(const std::string& s) {
 #else
 namespace suji {
 #endif
+// Load a hotwords file (one term per line; '#' comment lines and blank lines
+// skipped) and join the terms with ',' for Qwen3's `hotwords` field, which wants
+// an inline comma-separated UTF-8 string ("foo,bar,baz"). Returns "" if the file
+// can't be opened or yields no terms (caller then leaves hotwords unset). The
+// file's existence is validated upstream in the CLI; a failed open here is logged.
+static std::string load_hotwords_csv(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) { log_err("hotwords: cannot open " + path); return {}; }
+  std::string line, out;
+  while (std::getline(f, line)) {
+    // strip trailing CR (CRLF files) and surrounding ASCII whitespace
+    while (!line.empty() && (line.back()=='\r' || line.back()==' ' || line.back()=='\t')) line.pop_back();
+    size_t b = line.find_first_not_of(" \t");
+    if (b == std::string::npos) continue;            // blank line
+    if (line[b] == '#') continue;                    // comment line
+    std::string term = line.substr(b);
+    if (!out.empty()) out += ',';
+    out += term;
+  }
+  return out;
+}
 Asr::Asr(const EngineConfig& cfg) {
 #ifdef _WIN32
   if (cfg.provider == Provider::Cuda && !cfg.cuda_dll_dir.empty()) {
@@ -28,6 +52,9 @@ Asr::Asr(const EngineConfig& cfg) {
   SherpaOnnxOfflineRecognizerConfig c; std::memset(&c, 0, sizeof(c));
   c.feat_config.sample_rate = 16000;
   c.feat_config.feature_dim = 80;
+  // Qwen3 hotwords CSV (declared here so it outlives the borrowed c-string in `c`
+  // until SherpaOnnxCreateOfflineRecognizer(&c) below has consumed the config).
+  std::string hotwords_csv;
   // Model selection precedence: Qwen3-ASR > FireRedASR AED > FireRedASR CTC.
   // Qwen3 (model_type="qwen3_asr") wins when BOTH its encoder and decoder are set;
   // it uses a tokenizer DIRECTORY (vocab.json), NOT tokens.txt. Otherwise: when both
@@ -41,6 +68,17 @@ Asr::Asr(const EngineConfig& cfg) {
     c.model_config.qwen3_asr.decoder       = cfg.qwen3_decoder.c_str();
     c.model_config.qwen3_asr.tokenizer     = cfg.qwen3_tokenizer.c_str();
     c.model_config.model_type = "qwen3_asr";
+    // Qwen3 proper-noun biasing: its `hotwords` field wants an INLINE comma-separated
+    // UTF-8 string (per sherpa-onnx c-api: "foo,bar,baz"), NOT a file path and NOT the
+    // global hotwords_file (that path is transducer/CTC-only). Convert the one-per-line
+    // file to CSV here. Only set the pointer when non-empty so memset's NULL default holds.
+    if (!cfg.hotwords.empty()) {
+      hotwords_csv = load_hotwords_csv(cfg.hotwords);
+      if (!hotwords_csv.empty()) {
+        c.model_config.qwen3_asr.hotwords = hotwords_csv.c_str();
+        log_info("qwen3 hotwords: " + std::to_string(std::count(hotwords_csv.begin(), hotwords_csv.end(), ',') + 1) + " term(s) loaded");
+      }
+    }
   } else if (use_aed) {
     c.model_config.fire_red_asr.encoder = cfg.asr_encoder.c_str();
     c.model_config.fire_red_asr.decoder = cfg.asr_decoder.c_str();

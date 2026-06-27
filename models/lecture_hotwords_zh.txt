@@ -1,0 +1,15 @@
+# Qwen3-ASR hotwords (proper-noun / domain-term biasing) for the econ lecture.
+# Format: ONE term per line. Lines starting with '#' and blank lines are ignored.
+# The engine joins these terms into a comma-separated string for Qwen3's inline
+# `hotwords` config field. Keep terms short (names / fixed phrases work best).
+# Usage:  suji_batch <inputs> --qwen3-dir <dir> --hotwords models/lecture_hotwords_zh.txt
+埃莉诺·奥斯特罗姆
+奥斯特罗姆
+奥利弗·威廉姆森
+威廉姆森
+约翰·贝茨·克拉克奖
+克拉克奖章
+诺贝尔经济学奖
+GOVERNANCE
+CORPORATE GOVERNANCE
+POLITICAL SCIENTIST
