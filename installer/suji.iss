@@ -32,7 +32,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
-; ~模型 ~4.0GB(Qwen3-ASR 0.95GB[准确度] + fp16-AED 2.2GB[速度] + int8-CTC 742MB[词级字幕] + 标点 77MB)+ CUDA 运行时 ~2.4GB + ffmpeg 108MB(lzma2 压缩后约 4–4.5GB);允许装到非系统盘
+; ~模型 ~1.8GB(Qwen3-ASR 0.95GB[准确度] + int8-CTC 742MB[词级字幕] + 标点 77MB;AED 已排除)+ CUDA 运行时 ~2.4GB + ffmpeg 108MB(lzma2 压缩后约 3GB,单文件 .exe);允许装到非系统盘
 UsePreviousAppDir=yes
 
 [Languages]
@@ -62,7 +62,9 @@ Source: "{#SrcRel}\networkinformation\*"; DestDir: "{app}\networkinformation"; F
 Source: "{#SrcVendor}\ffmpeg-master-latest-win64-lgpl\bin\ffmpeg.exe";  DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SrcVendor}\ffmpeg-master-latest-win64-lgpl\bin\ffprobe.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; --- 模型 (app_dir()/models/...) ---
-Source: "{#SrcModels}\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs createallsubdirs
+; v1.0: 排除 fp16-AED「速度」模型(2.2GB)以保持单文件 .exe < 4.2GB 上限。
+;       Qwen3(准确度,默认)+ int8-CTC(词级字幕)+ 标点 已足够;GUI 自动禁用「速度」模式。
+Source: "{#SrcModels}\*"; DestDir: "{app}\models"; Excludes: "sherpa-onnx-fire-red-asr-large-zh_en-fp16-2025-02-16\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; --- 文档 ---
 Source: "..\README.md";    DestDir: "{app}"; Flags: ignoreversion isreadme
 Source: "..\BENCHMARK.md"; DestDir: "{app}"; Flags: ignoreversion

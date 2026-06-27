@@ -41,6 +41,7 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardItemModel>
+#include "core/paths.h"   // discover_fp16_aed() — to disable the 速度 mode when unbundled
 #include <QStyle>
 #include <QStyledItemDelegate>
 #include <QStyleOptionProgressBar>
@@ -708,6 +709,14 @@ MainWindow::MainWindow(QWidget* parent)
     m_mode->setToolTip(tr("转写模式:准确度(Qwen3) / 速度(AED) / 词级字幕(CTC)。"
                           "模式决定使用的模型与推荐后端;下方「推理后端」为高级覆盖。"));
     m_mode->setCurrentIndex(0);
+    // The fp16-AED「速度」model (2.2GB) is NOT bundled in the single-file installer.
+    // When its model isn't present, disable that mode so the user can't pick a missing
+    // model; if a user adds the AED model later, the mode auto-enables on next launch.
+    if (!discover_fp16_aed().ok()) {
+        if (auto* mdl = qobject_cast<QStandardItemModel*>(m_mode->model()))
+            if (auto* it = mdl->item(1)) it->setFlags(it->flags() & ~Qt::ItemIsEnabled);
+        m_mode->setItemData(1, tr("fp16 AED「速度」模型未随本版安装(为减小体积);添加该模型后自动启用。"), Qt::ToolTipRole);
+    }
 
     auto* providerLabel = new QLabel(tr("推理后端:"), bottomWidget);
     m_provider = new QComboBox(bottomWidget);
