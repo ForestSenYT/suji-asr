@@ -240,10 +240,8 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
       results[i].ok = false; results[i].err = "cancelled";
     }
     if(results[i].ok){
-      auto& toks = file_tokens[i];
-      std::sort(toks.begin(), toks.end(), [](const Token&a,const Token&b){ return a.start<b.start; });
       Transcript tr;
-      tr.segments = merge_tokens(toks, cfg.merge_gap, cfg.merge_max_dur);
+      tr.segments = merge_file_tokens(std::move(file_tokens[i]), cfg.merge_gap, cfg.merge_max_dur);
       for(auto& seg : tr.segments){ seg.text = punct.add(seg.text); tr.full_text += seg.text; }
       results[i].transcript = std::move(tr);
       log_info("完成: " + basename_utf8(inputs[i]) + " (" + std::to_string(results[i].transcript.segments.size()) + " 段)");  // C1
@@ -475,9 +473,8 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
       std::vector<Token> toks = std::move(tok_cpu[i]);
       toks.insert(toks.end(), std::make_move_iterator(tok_gpu[i].begin()),
                               std::make_move_iterator(tok_gpu[i].end()));
-      std::sort(toks.begin(), toks.end(), [](const Token&a,const Token&b){ return a.start<b.start; });
       Transcript tr;
-      tr.segments = merge_tokens(toks, cfg.merge_gap, cfg.merge_max_dur);
+      tr.segments = merge_file_tokens(std::move(toks), cfg.merge_gap, cfg.merge_max_dur);
       for(auto& seg : tr.segments){ seg.text = punct.add(seg.text); tr.full_text += seg.text; }
       results[i].transcript = std::move(tr);
       log_info("完成: " + basename_utf8(inputs[i]) + " (" + std::to_string(results[i].transcript.segments.size()) + " 段)");  // C1

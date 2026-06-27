@@ -1,5 +1,6 @@
 #include "doctest/doctest.h"
 #include "core/segment_merge.h"
+#include <string>
 
 using namespace suji;
 
@@ -32,6 +33,36 @@ TEST_CASE("merge by max duration") {
 
 TEST_CASE("empty input") {
   CHECK(merge_tokens({},1.0,30.0).empty());
+}
+
+// ---- merge_file_tokens: STABLE ordering (fp16-AED has no per-token timestamps) ----
+
+TEST_CASE("merge_file_tokens: equal timestamps keep emission order (fp16-AED no-scramble)") {
+  // fp16-AED emits no per-token timestamps -> every token in a segment shares one base
+  // time. An UNSTABLE sort scrambles these equal-key tokens (the real bug); stable must
+  // preserve the model's left-to-right emission order. 64 tokens makes introsort actually
+  // reorder equal keys, so this would FAIL if merge_file_tokens reverted to std::sort.
+  std::vector<Token> toks;
+  std::string expected;
+  for (int i = 0; i < 64; ++i) {
+    std::string s = std::to_string(i);
+    toks.push_back(T(s.c_str(), 1.5));   // ALL the same timestamp
+    expected += s;
+  }
+  auto segs = merge_file_tokens(toks, 1.0, 1000.0);   // no gaps -> single segment
+  REQUIRE(segs.size() == 1);
+  CHECK(segs[0].text == expected);                    // order preserved
+}
+
+TEST_CASE("merge_file_tokens: out-of-order processing reordered by time, within-segment kept") {
+  // Simulate hetero / P5-bucketing: a later segment's tokens appended BEFORE an earlier
+  // one. Distinct bases -> stable sort orders segments by time AND keeps each segment's
+  // internal emission order.
+  std::vector<Token> toks = { T("C",5.0), T("D",5.0), T("A",1.0), T("B",1.0) };
+  auto segs = merge_file_tokens(toks, 1.0, 1000.0);
+  REQUIRE(segs.size() == 2);
+  CHECK(segs[0].text == u8"AB");   // earlier base first, order kept
+  CHECK(segs[1].text == u8"CD");
 }
 
 // ---- T6: end-time property tests ----

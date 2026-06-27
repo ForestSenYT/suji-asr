@@ -1,4 +1,5 @@
 #include "core/segment_merge.h"
+#include <algorithm>
 
 namespace suji {
 
@@ -60,6 +61,14 @@ std::vector<Segment> merge_tokens(const std::vector<Token>& raw, double gap_sec,
   cur.end = toks.back().start + kLastTokenPad;
   segs.push_back(cur);
   return segs;
+}
+
+std::vector<Segment> merge_file_tokens(std::vector<Token> toks, double gap_sec, double max_dur_sec) {
+  // STABLE so equal-timestamp tokens (fp16-AED, which emits no per-token timestamps)
+  // keep their emission order instead of being scrambled by an unstable sort.
+  std::stable_sort(toks.begin(), toks.end(),
+                   [](const Token& a, const Token& b){ return a.start < b.start; });
+  return merge_tokens(toks, gap_sec, max_dur_sec);
 }
 
 } // namespace suji
