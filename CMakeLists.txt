@@ -51,6 +51,15 @@ if(Qt6_FOUND)
   target_link_libraries(suji_gui PRIVATE suji_core Qt6::Widgets)
   target_include_directories(suji_gui PRIVATE src)
   suji_copy_runtime_dlls(suji_gui)
+  # STARTUP (STEP 8): delay-load sherpa (and transitively onnxruntime, ~14MB) off the
+  # pre-main loader map so the GUI window paints before the heavy DLL is mapped. The fault
+  # now surfaces at first transcribe on the worker thread (EngineWorker::run), which has
+  # crash-safe fallbacks + a log sink. SCOPED TO suji_gui ONLY — suji_cli/suji_batch/
+  # suji_tests call sherpa immediately and must NOT be delay-loaded. Do NOT delay-load Qt.
+  if(MSVC)
+    target_link_options(suji_gui PRIVATE /DELAYLOAD:sherpa-onnx-c-api.dll)
+    target_link_libraries(suji_gui PRIVATE delayimp)
+  endif()
   message(STATUS "Qt6 found -> building suji_gui")
 else()
   message(STATUS "Qt6 NOT found -> skipping suji_gui (configure with -DCMAKE_PREFIX_PATH=F:/Qt/6.8.1/msvc2022_64)")
