@@ -7,6 +7,13 @@
 
 namespace suji {
 
+// Transcription mode (transcription-quality preset). Drives the model + the
+// recommended provider in EngineWorker::run(). The int values are persisted in
+// QSettings and passed across the queued cross-thread run() invocation, so keep
+// them stable: 0=Qwen3 (default, most accurate), 1=AED (fp16, fastest), 2=CTC
+// (int8, per-token timestamps for word-level subtitles).
+enum class Mode { Qwen3 = 0, Aed = 1, Ctc = 2 };
+
 class EngineWorker : public QObject {
     Q_OBJECT
 public:
@@ -15,7 +22,8 @@ public:
 public slots:
     void run(QStringList inputs, QString outDir, QString provider,
              bool srt, bool vtt, bool json, bool md,
-             int batchOverride = 0, int inFlightOverride = 0);
+             int batchOverride = 0, int inFlightOverride = 0,
+             int mode = 0 /*Mode::Qwen3*/);
     void requestCancel(); // thread-safe: direct atomic store, callable from any thread
 
 signals:

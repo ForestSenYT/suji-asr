@@ -107,7 +107,7 @@ static std::string effective_dir_cached(const std::string& desired_dir,
 
 void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
                        bool srt, bool vtt, bool json, bool md,
-                       int batchOverride, int inFlightOverride)
+                       int batchOverride, int inFlightOverride, int mode)
 {
     // Re-entrancy guard: reject concurrent calls (e.g. double-click Start)
     bool expected = false;
@@ -162,25 +162,66 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
         }
     }
 
-    // --- Auto-prefer the fp16 FireRedASR AED model on GPU (mirrors batch_main.cpp) ---
-    // When the fp16-AED model is present AND a working CUDA GPU is available AND the
-    // user didn't force a CPU/hetero provider, use fp16-AED on CUDA: it's ~9.2x faster
-    // than int8-CTC on GPU AND more accurate (int8-CTC leaks "< sil >" markers). So the
-    // GUI "just works" with the better model. fp16 is GPU-only (crashes on the CPU EP),
-    // so the crash-safe CUDA-DLL fallback below (empty cuda_dll_dir -> CPU) still guards
-    // against a missing CUDA runtime. The GUI has no manual --asr-encoder override.
-    if (prov != "cpu" && prov != "hetero" &&
-        hw.has_cuda_gpu && hw.cuda_runtime_available) {
-        AedModel aed = discover_fp16_aed();
-        if (aed.ok()) {
-            tune.provider = Provider::Cuda;
-            c.asr_encoder = aed.encoder;
-            c.asr_decoder = aed.decoder;
-            c.tokens      = aed.tokens;
+    // ------------------------------------------------------------------
+    // Transcription MODE -> model + recommended provider.
+    //
+    // The mode ALWAYS picks the model. It also sets the recommended provider,
+    // but ONLY when the user left the provider combo on "auto" — an explicit
+    // cpu/cuda/hetero pick (handled above) is an ADVANCED override that wins.
+    // `prov_is_auto` captures "did the user leave provider on auto?".
+    //
+    // Modes:
+    //   Qwen3 (default): Qwen3-ASR model, provider=cpu (its data-parallel K=2
+    //     auto-applies via the CPU recompute below). Most accurate (names + 中英混).
+    //     If the model isn't found, fall back to AED mode (graceful).
+    //   AED: fp16 FireRedASR-AED on cuda. Fastest, less accurate. fp16 is GPU-only
+    //     (crashes on the CPU EP), so the crash-safe CUDA-DLL fallback below still
+    //     guards a missing CUDA runtime.
+    //   CTC: the default int8 FireRedASR2-CTC asr_model, provider=auto (decide()'s
+    //     pick). Has per-token timestamps for fine word-level subtitle timing.
+    // ------------------------------------------------------------------
+    const bool prov_is_auto = (prov != "cpu" && prov != "cuda" && prov != "hetero");
+
+    // gpu_usable folds in "user didn't force cpu/hetero" + a working CUDA runtime;
+    // plan_mode() only needs to know if the AED/fp16 branch can run on the GPU.
+    const bool gpu_usable = (prov != "cpu" && prov != "hetero" &&
+                             hw.has_cuda_gpu && hw.cuda_runtime_available);
+
+    // Probe only what the selected mode might need (avoids scanning models_dir twice).
+    Qwen3Model qwen3 = (mode == static_cast<int>(Mode::Qwen3)) ? discover_qwen3() : Qwen3Model{};
+    AedModel   aed   = (mode == static_cast<int>(Mode::Qwen3) ||
+                        mode == static_cast<int>(Mode::Aed))   ? discover_fp16_aed() : AedModel{};
+
+    const ModePlan plan = plan_mode(static_cast<TranscribeMode>(mode),
+                                    qwen3.ok(), aed.ok(), gpu_usable);
+    if (plan.fell_back)
+        log_info(u8"未找到 Qwen3 模型,回退到 AED 速度模式");
+
+    switch (plan.model) {
+        case ModeModel::Qwen3:
+            c.qwen3_conv_frontend = qwen3.conv_frontend;
+            c.qwen3_encoder       = qwen3.encoder;
+            c.qwen3_decoder       = qwen3.decoder;
+            c.qwen3_tokenizer     = qwen3.tokenizer;
+            log_info(u8"使用 Qwen3 模型(准确度优先)");
+            break;
+        case ModeModel::Aed:
+            c.asr_encoder  = aed.encoder;
+            c.asr_decoder  = aed.decoder;
+            c.tokens       = aed.tokens;
             c.cuda_dll_dir = hw.cuda_dll_dir;
-            log_info("using fp16 AED model on GPU (faster + more accurate than int8)");
-        }
+            log_info(u8"使用 fp16 AED 模型(速度优先, GPU)");
+            break;
+        case ModeModel::Ctc:
+            // Leave the default int8-CTC asr_model untouched. Per-token timestamps.
+            log_info(u8"使用 int8-CTC 模型(词级字幕)");
+            break;
     }
+
+    // Apply the mode's recommended provider ONLY when the user left provider on
+    // "auto"; an explicit cpu/cuda/hetero pick (handled above) is the override.
+    if (plan.provider_is_recommendation && prov_is_auto)
+        tune.provider = plan.recommended_provider;
 
     // Crash-safe CUDA/Hetero: only run on GPU when the CUDA DLL dir is known.
     if (tune.provider == Provider::Cuda || tune.provider == Provider::Hetero) {
