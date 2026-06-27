@@ -106,3 +106,90 @@ TEST_CASE("AedModel::ok() is true only when all three paths are set") {
     a.decoder = "d"; CHECK_FALSE(a.ok());
     a.tokens  = "t"; CHECK(a.ok());
 }
+
+// discover_qwen3() — auto-detect the Qwen3-ASR model in models_dir().
+TEST_CASE("discover_qwen3: returns empty or a complete, existing Qwen3Model") {
+    Qwen3Model m = discover_qwen3();
+    std::error_code ec;
+    if (m.ok()) {
+        // When ok(), all four paths must exist (3 files + tokenizer DIR).
+        CHECK(std::filesystem::exists(m.conv_frontend, ec));
+        CHECK(std::filesystem::exists(m.encoder, ec));
+        CHECK(std::filesystem::exists(m.decoder, ec));
+        CHECK(std::filesystem::exists(m.tokenizer, ec));
+        // The tokenizer is a DIRECTORY containing vocab.json.
+        CHECK(std::filesystem::is_directory(m.tokenizer, ec));
+        CHECK(std::filesystem::exists(m.tokenizer + "/vocab.json", ec));
+        // Discovered dir matches the expected Qwen3 naming pattern.
+        CHECK(m.encoder.find("sherpa-onnx-qwen3-asr") != std::string::npos);
+        CHECK(m.encoder.find("encoder") != std::string::npos);
+        CHECK(m.decoder.find("decoder") != std::string::npos);
+    } else {
+        // ok()==false: an incomplete/empty result -> all four empty.
+        CHECK(m.conv_frontend.empty());
+        CHECK(m.encoder.empty());
+        CHECK(m.decoder.empty());
+        CHECK(m.tokenizer.empty());
+    }
+}
+
+// Qwen3Model::ok() requires all four paths non-empty.
+TEST_CASE("Qwen3Model::ok() is true only when all four paths are set") {
+    Qwen3Model q;
+    CHECK_FALSE(q.ok());
+    q.conv_frontend = "c"; CHECK_FALSE(q.ok());
+    q.encoder       = "e"; CHECK_FALSE(q.ok());
+    q.decoder       = "d"; CHECK_FALSE(q.ok());
+    q.tokenizer     = "t"; CHECK(q.ok());
+}
+
+// plan_mode() — the mode -> (model, recommended provider) decision table.
+TEST_CASE("plan_mode: Qwen3 mode picks Qwen3 + recommends CPU when model present") {
+    ModePlan p = plan_mode(TranscribeMode::Qwen3, /*qwen3*/true, /*aed*/true, /*gpu*/true);
+    CHECK(p.model == ModeModel::Qwen3);
+    CHECK(p.recommended_provider == Provider::Cpu);
+    CHECK(p.provider_is_recommendation);
+    CHECK_FALSE(p.fell_back);
+}
+
+TEST_CASE("plan_mode: Qwen3 mode falls back to AED on GPU when Qwen3 absent") {
+    ModePlan p = plan_mode(TranscribeMode::Qwen3, /*qwen3*/false, /*aed*/true, /*gpu*/true);
+    CHECK(p.model == ModeModel::Aed);
+    CHECK(p.recommended_provider == Provider::Cuda);
+    CHECK(p.provider_is_recommendation);
+    CHECK(p.fell_back);
+}
+
+TEST_CASE("plan_mode: Qwen3 mode falls back to CTC when neither Qwen3 nor a GPU AED is usable") {
+    // Qwen3 missing, no usable GPU -> AED branch can't run -> CTC default, no rec.
+    ModePlan p = plan_mode(TranscribeMode::Qwen3, /*qwen3*/false, /*aed*/true, /*gpu*/false);
+    CHECK(p.model == ModeModel::Ctc);
+    CHECK_FALSE(p.provider_is_recommendation);
+    CHECK(p.fell_back);
+}
+
+TEST_CASE("plan_mode: AED mode picks AED + recommends CUDA when GPU + model present") {
+    ModePlan p = plan_mode(TranscribeMode::Aed, /*qwen3*/false, /*aed*/true, /*gpu*/true);
+    CHECK(p.model == ModeModel::Aed);
+    CHECK(p.recommended_provider == Provider::Cuda);
+    CHECK(p.provider_is_recommendation);
+}
+
+TEST_CASE("plan_mode: AED mode without a usable GPU falls back to CTC (no provider rec)") {
+    ModePlan p = plan_mode(TranscribeMode::Aed, /*qwen3*/false, /*aed*/true, /*gpu*/false);
+    CHECK(p.model == ModeModel::Ctc);
+    CHECK_FALSE(p.provider_is_recommendation);
+}
+
+TEST_CASE("plan_mode: AED mode without the fp16 model falls back to CTC") {
+    ModePlan p = plan_mode(TranscribeMode::Aed, /*qwen3*/false, /*aed*/false, /*gpu*/true);
+    CHECK(p.model == ModeModel::Ctc);
+    CHECK_FALSE(p.provider_is_recommendation);
+}
+
+TEST_CASE("plan_mode: CTC mode always picks CTC with no provider recommendation") {
+    ModePlan p = plan_mode(TranscribeMode::Ctc, /*qwen3*/true, /*aed*/true, /*gpu*/true);
+    CHECK(p.model == ModeModel::Ctc);
+    CHECK_FALSE(p.provider_is_recommendation);
+    CHECK_FALSE(p.fell_back);
+}

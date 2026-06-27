@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include "core/config.h"   // Provider
 
 namespace suji {
 
@@ -53,5 +54,62 @@ struct AedModel {
 /// UTF-8-safe (std::filesystem with error_code; no throw). NOTE: fp16 is GPU-only
 /// (it crashes on the CPU EP) — callers must gate use on a working CUDA GPU.
 AedModel discover_fp16_aed();
+
+/// Result of discover_qwen3(): absolute paths to the Qwen3-ASR model files
+/// (conv-frontend + encoder + decoder ONNX) plus the tokenizer DIRECTORY (the dir
+/// containing vocab.json). ok() is true only when all four are present.
+struct Qwen3Model {
+    std::string conv_frontend, encoder, decoder, tokenizer;
+    bool ok() const {
+        return !conv_frontend.empty() && !encoder.empty()
+            && !decoder.empty() && !tokenizer.empty();
+    }
+};
+
+/// Auto-discover the Qwen3-ASR model under models_dir().
+/// Scans for a directory matching "sherpa-onnx-qwen3-asr*" and, inside it, matches
+/// the .onnx files by substring (*conv*front* -> conv_frontend, *encoder* -> encoder,
+/// *decoder* -> decoder) and locates the tokenizer dir (the dir containing vocab.json,
+/// the model dir itself or a subdir). Returns their absolute paths if ALL four are
+/// present, else an empty Qwen3Model (ok()==false). Mirrors discover_fp16_aed():
+/// UTF-8-safe (std::filesystem with error_code; no throw).
+Qwen3Model discover_qwen3();
+
+// ---------------------------------------------------------------------------
+// Transcription-mode model/provider planner (pure; no hardware probe, no I/O).
+// Captures the GUI's mode -> model + recommended-provider decision table so it is
+// testable in isolation. The GUI's EngineWorker::run() calls this AFTER probing
+// for the models + GPU, then applies the result to its EngineConfig/AutoTune.
+// ---------------------------------------------------------------------------
+
+/// Which ASR model the chosen mode resolved to.
+enum class ModeModel { Qwen3, Aed, Ctc };
+
+/// Transcription mode (mirror of gui Mode enum; kept Qt-free in core).
+/// 0=Qwen3 (准确度, default), 1=AED (速度), 2=CTC (词级字幕).
+enum class TranscribeMode { Qwen3 = 0, Aed = 1, Ctc = 2 };
+
+/// Result of plan_mode(): the model to use and the recommended provider.
+/// `provider_is_recommendation` is true when the provider came from the mode's
+/// default (caller applies it only if the user left provider on "auto"); false
+/// means the mode imposes no provider preference (CTC -> let decide() pick).
+struct ModePlan {
+    ModeModel model = ModeModel::Ctc;
+    Provider  recommended_provider = Provider::Cpu;
+    bool      provider_is_recommendation = false;
+    bool      fell_back = false;   ///< Qwen3 requested but not found -> AED chosen
+};
+
+/// Pure mode -> (model, recommended provider) mapping.
+///   mode Qwen3: if qwen3_available -> Qwen3 model, recommend CPU. Else fall back
+///     to the AED branch (fell_back=true).
+///   mode AED: if a CUDA GPU is usable (gpu_usable) AND aed_available -> AED model,
+///     recommend CUDA. Else no model override (Ctc default) and no recommendation
+///     (provider stays decide()'s pick) — graceful when fp16/GPU is absent.
+///   mode CTC: Ctc model, no provider recommendation (decide() picks).
+/// gpu_usable should already fold in "user didn't force cpu/hetero" + a working
+/// CUDA runtime at the call site; this function only decides the table.
+ModePlan plan_mode(TranscribeMode mode, bool qwen3_available,
+                   bool aed_available, bool gpu_usable);
 
 } // namespace suji
