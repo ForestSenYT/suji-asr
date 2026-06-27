@@ -18,6 +18,13 @@ struct AutoTune {
   int      batch          = 1;
   int      in_flight_files = 1;
   int      num_threads    = 1;
+  // Data-parallel CPU consumers: K independent CPU recognizers (each its own Asr
+  // handle + num_threads), all draining the ONE shared queue, results merged per
+  // file at finalize. 1 = the single-consumer path (no behaviour change). >1 raises
+  // AGGREGATE multi-file throughput for single-stream-bound models (Qwen3's 721M
+  // autoregressive int8 decoder runs batch=1 serial, so one recognizer can't
+  // saturate the cores). Set per-consumer num_threads ~= total_logical / K.
+  int      cpu_consumers  = 1;
   // hetero per-engine fields
   bool     hetero         = false;
   int      cpu_batch      = 1;
@@ -50,4 +57,13 @@ AutoTune decide(const HardwareInfo& hw, const EngineConfig& cfg);
 // Call decide() first if you want the full auto-tune; call fill_hetero() when
 // the caller already knows it wants the Hetero path (e.g. --provider hetero).
 void fill_hetero(AutoTune& t, const HardwareInfo& hw, int num_files);
+
+// Data-parallel CPU-consumer split for the Qwen3-ASR model ONLY. When cfg selects
+// Qwen3 (cfg.qwen3_encoder non-empty) AND t.provider==Cpu, set t.cpu_consumers=K and
+// split t.num_threads = clamp(total_logical/K, 2, total_logical) so K independent CPU
+// recognizers share the cores. For all OTHER models (or non-CPU provider) this is a
+// no-op: cpu_consumers stays 1 and num_threads is untouched. total_logical is the
+// machine's logical core count (hw.cpu_threads). Idempotent / safe to call after a
+// CPU recompute in the CLI/GUI. K is the benchmarked optimum (see hardware.cpp).
+void set_qwen3_cpu_consumers(AutoTune& t, const EngineConfig& cfg, int total_logical);
 }

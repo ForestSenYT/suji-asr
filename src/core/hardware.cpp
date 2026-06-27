@@ -168,6 +168,22 @@ void fill_hetero(AutoTune& t, const HardwareInfo& hw, int num_files) {
          t.in_flight_files + gpu_feed + t.cpu_asr_threads <= C);
 }
 
+void set_qwen3_cpu_consumers(AutoTune& t, const EngineConfig& cfg, int total_logical){
+  // Qwen3-only, CPU-only. Other models batch fine in sherpa and a 2nd recognizer would
+  // just contend; non-CPU providers run a single recognizer. Leave cpu_consumers=1.
+  if (cfg.qwen3_encoder.empty() || t.provider != Provider::Cpu) return;
+  const int C = std::max(1, total_logical);
+  // K=3 is the benchmarked optimum on the 5800X (16 logical): the 721M int8 decoder is
+  // single-stream serial, so 3 recognizers x ~5 threads each beat both 1x16 (under-
+  // parallel: cores idle waiting on the serial decoder) and 4x4 (over-split: per-call
+  // ONNX intra-op efficiency drops + 4x model RAM). Cap K so each consumer keeps >=2
+  // threads (K <= C/2) -- on a tiny box (<6 logical) this falls back toward 1.
+  const int K = std::clamp(C / 2, 1, 3);
+  t.cpu_consumers = K;
+  // Per-consumer threads ~= total_logical / K, floored at 2 (ONNX needs >=2 to overlap).
+  t.num_threads   = std::clamp(C / K, 2, C);
+}
+
 AutoTune decide(const HardwareInfo& hw, const EngineConfig& cfg){
   AutoTune t;
   const int C = hw.cpu_threads;
@@ -198,6 +214,12 @@ AutoTune decide(const HardwareInfo& hw, const EngineConfig& cfg){
     // R1 fix: only the non-hetero branches use the RAM clamp.
     int by_ram      = hw.ram_free_mb > 0 ? hw.ram_free_mb / 2000 : 2;
     t.in_flight_files = std::max(2, std::min(8, by_ram));
+    // Data-parallel CPU consumers for Qwen3 (its 721M autoregressive int8 decoder
+    // runs batch=1 serial in sherpa, so a SINGLE recognizer can't saturate the cores).
+    // K independent recognizers each get total_logical/K threads -> higher AGGREGATE
+    // multi-file throughput. Benchmarked optimum on the 5800X (16 logical) is K=3
+    // (see set_qwen3_cpu_consumers). All OTHER models batch fine -> cpu_consumers stays 1.
+    set_qwen3_cpu_consumers(t, cfg, C);
   }
   // T5: apply optional caps (0 = uncapped/auto)
   if (cfg.max_batch   > 0) {
