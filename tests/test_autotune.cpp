@@ -262,8 +262,8 @@ TEST_CASE("set_qwen3_cpu_consumers: Qwen3 on CPU splits cores into K consumers")
   EngineConfig cfg; cfg.qwen3_encoder = "encoder.int8.onnx";   // marks Qwen3 active
   AutoTune t; t.provider = Provider::Cpu; t.num_threads = 16;
   set_qwen3_cpu_consumers(t, cfg, 16);
-  CHECK(t.cpu_consumers == 3);                 // 16 logical -> clamp(16/2,1,3)=3
-  CHECK(t.num_threads == 5);                   // clamp(16/3,2,16)=5 per consumer
+  CHECK(t.cpu_consumers == 2);                 // 16 logical -> clamp(16/4,1,2)=2 (benchmarked)
+  CHECK(t.num_threads == 8);                   // clamp(16/2,2,16)=8 per consumer
   CHECK(t.cpu_consumers * t.num_threads <= 16 + t.cpu_consumers);  // ~no oversubscription
 }
 
@@ -285,13 +285,13 @@ TEST_CASE("set_qwen3_cpu_consumers: Qwen3 on CUDA keeps cpu_consumers=1 (no-op)"
   CHECK(t.num_threads == 1);                    // untouched
 }
 
-// Tiny box (few logical cores): K must fall back toward 1 so each consumer keeps >=2 threads.
+// Tiny box (few logical cores): K must fall back to 1 so each consumer keeps enough threads.
 TEST_CASE("set_qwen3_cpu_consumers: tiny box falls back to 1 consumer") {
   EngineConfig cfg; cfg.qwen3_encoder = "encoder.int8.onnx";
   AutoTune t; t.provider = Provider::Cpu; t.num_threads = 4;
-  set_qwen3_cpu_consumers(t, cfg, 2);          // 2 logical -> clamp(1,1,3)=1
+  set_qwen3_cpu_consumers(t, cfg, 4);          // 4 logical -> clamp(4/4,1,2)=1
   CHECK(t.cpu_consumers == 1);
-  CHECK(t.num_threads == 2);                    // clamp(2/1,2,2)=2
+  CHECK(t.num_threads == 4);                    // clamp(4/1,2,4)=4
 }
 
 // Default decide() on a CPU box with Qwen3 cfg picks the multi-consumer split.
@@ -299,8 +299,8 @@ TEST_CASE("decide: CPU + Qwen3 cfg sets cpu_consumers>1") {
   EngineConfig cfg; cfg.qwen3_encoder = "encoder.int8.onnx";
   auto t = decide(hw(false, 0, 16, 40000), cfg);   // no GPU -> CPU path
   CHECK(t.provider == Provider::Cpu);
-  CHECK(t.cpu_consumers == 3);
-  CHECK(t.num_threads == 5);
+  CHECK(t.cpu_consumers == 2);
+  CHECK(t.num_threads == 8);
 }
 
 // Default decide() on a CPU box WITHOUT Qwen3 keeps the single-consumer default.

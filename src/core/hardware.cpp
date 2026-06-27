@@ -173,12 +173,14 @@ void set_qwen3_cpu_consumers(AutoTune& t, const EngineConfig& cfg, int total_log
   // just contend; non-CPU providers run a single recognizer. Leave cpu_consumers=1.
   if (cfg.qwen3_encoder.empty() || t.provider != Provider::Cpu) return;
   const int C = std::max(1, total_logical);
-  // K=3 is the benchmarked optimum on the 5800X (16 logical): the 721M int8 decoder is
-  // single-stream serial, so 3 recognizers x ~5 threads each beat both 1x16 (under-
-  // parallel: cores idle waiting on the serial decoder) and 4x4 (over-split: per-call
-  // ONNX intra-op efficiency drops + 4x model RAM). Cap K so each consumer keeps >=2
-  // threads (K <= C/2) -- on a tiny box (<6 logical) this falls back toward 1.
-  const int K = std::clamp(C / 2, 1, 3);
+  // K=2 is the benchmarked optimum on the 5800X (16 logical, 6x50s files). The 721M int8
+  // decoder is single-stream serial, so a SINGLE recognizer (1x16) leaves cores idle
+  // waiting on the serial decoder. Two recognizers x ~8 threads each won the sweep:
+  //   K=1 -> ~4.1-4.4x   K=2 -> ~5.6-6.2x   K=3 -> ~5.9x   K=4 -> ~5.8x realtime.
+  // K=2 is best (~1.4-1.5x over K=1); K>=3 regresses slightly (per-call ONNX intra-op
+  // efficiency drops as threads/consumer fall + Kx model RAM). Cap K so each consumer
+  // keeps >=4 threads (K <= C/4) -- on a tiny box (<8 logical) this falls back to 1.
+  const int K = std::clamp(C / 4, 1, 2);
   t.cpu_consumers = K;
   // Per-consumer threads ~= total_logical / K, floored at 2 (ONNX needs >=2 to overlap).
   t.num_threads   = std::clamp(C / K, 2, C);
