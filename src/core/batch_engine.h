@@ -26,7 +26,16 @@ struct FileResult { std::string input; bool ok=false; std::string err; Transcrip
 //   as those segments' tokens are routed. Lets the GUI draw a SEPARATE progress bar per
 //   file ("每个视频分开") instead of one shared global bar. INVARIANT (clean run):
 //   Σ files[i].segs_done == segs_done and Σ files[i].segs_total == segs_total.
-struct FilePstat { int file_index=0; long long segs_done=0; long long segs_total=0; };
+// full_seconds = this file's FULL audio duration (incl. silence), set by the engine
+//   from the upfront ffprobe sum (NOT segment-derived). The GUI divides this file's
+//   done-speech-seconds (samples_done_pf/16000) by this FIXED value for a per-file bar
+//   that never regresses (the segs_done/segs_total ratio is kept only for the 段数 text
+//   + 解码中/转写中 phase string, never again for a percentage). 0 = ffprobe failed.
+// samples_done_pf = this file's consumed speech samples (mirrors seg_done_pf: bumped by
+//   the consumer per routed segment). Both default-initialized so the CLI BatchProgress
+//   consumer keeps compiling unchanged (additive only).
+struct FilePstat { int file_index=0; long long segs_done=0; long long segs_total=0;
+                   double full_seconds=0; long long samples_done_pf=0; };
 struct BatchProgress {
   int files_total=0; int files_done=0;
   double audio_seconds_done=0; double total_audio_decoded=0;
@@ -38,7 +47,12 @@ using ProgressCb = std::function<void(const BatchProgress&)>;
 // Decodes+VADs files on producer threads, batches ASR on one consumer (owns recognizer),
 // then per-file: sort tokens by time -> merge_tokens -> punctuate -> Transcript.
 // cancel == nullptr: original behaviour (no cancellation).
+// file_full_seconds == nullptr (default): per-file FilePstat.full_seconds stays 0 (the
+//   CLI passes nullptr and compiles unchanged). When non-null it must be aligned to
+//   `inputs` (same size/order); the engine copies (*file_full_seconds)[i] into each
+//   FilePstat.full_seconds so the GUI can draw a stable per-file time-based bar.
 std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& inputs,
     const EngineConfig& cfg, const AutoTune& tune, ProgressCb cb = nullptr,
-    CancelToken* cancel = nullptr);
+    CancelToken* cancel = nullptr,
+    const std::vector<double>* file_full_seconds = nullptr);
 }

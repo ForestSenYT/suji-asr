@@ -16,6 +16,7 @@
 #include <chrono>
 #include <string>
 #include <iterator>
+#include <cstdio>
 namespace suji {
 namespace {
 struct SegTask { int file_id; int64_t start_sample; std::vector<float> samples; };
@@ -26,6 +27,16 @@ struct SegTask { int file_id; int64_t start_sample; std::vector<float> samples; 
 static std::string basename_utf8(const std::string& p) {
     size_t slash = p.find_last_of("/\\");
     return (slash == std::string::npos) ? p : p.substr(slash + 1);
+}
+
+// Tiny formatters for the live 转写中 log line (STEP 6). fmt1 = one-decimal speed (e.g.
+// "6.2"); mmss = a clamped mm:ss ETA string. Kept file-local — only the log line uses them.
+static std::string fmt1(double v){ char b[32]; std::snprintf(b,sizeof b,"%.1f",v); return b; }
+static std::string mmss(double secs){
+  if(secs < 0) secs = 0;
+  long long s = (long long)secs;
+  long long mm = s / 60, ss = s % 60;
+  char b[32]; std::snprintf(b,sizeof b,"%02lld:%02lld",mm,ss); return b;
 }
 
 // Route one transcribe_batch result into a per-file token sink (no global lock;
@@ -62,11 +73,15 @@ void mark_batch_failed(const std::vector<SegTask>& batch, size_t got,
 }
 
 std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::string>& inputs,
-    const EngineConfig& cfg, const AutoTune& tune, ProgressCb cb, CancelToken* cancel){
+    const EngineConfig& cfg, const AutoTune& tune, ProgressCb cb, CancelToken* cancel,
+    const std::vector<double>* file_full_seconds){
   const int N=(int)inputs.size();
   std::vector<FileResult> results(N);
   for(int i=0;i<N;i++){ results[i].input=inputs[i]; results[i].ok=true; }
   if(N==0) return results;
+
+  // STEP 6: wall-clock origin for the live 转写中 line's elapsed/speed (consumer-side).
+  auto t0 = std::chrono::steady_clock::now();
 
   // recognizer config reflects the tuned provider/threads
   EngineConfig ecfg = cfg; ecfg.provider = tune.provider;
@@ -94,6 +109,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
   // merge_file_tokens — same K-sink merge pattern the hetero path uses for its 2 sinks.
   std::vector<std::vector<std::vector<Token>>> sinks((size_t)kc, std::vector<std::vector<Token>>(N));
   std::vector<char> produced_complete(N,0);          // R6: set when ALL of a file's segs pushed
+  std::vector<char> file_logged(N,0);                // STEP 7: 转写:<file> logged once when seg_done_pf 0->1 (guarded by err_mu)
   // R6 fix: per-file pending-segment counter. Incremented by producer BEFORE push,
   // decremented by consumer AFTER routing tokens. On cancel the discarded `first`
   // is NOT decremented, so seg_pending[fi] > 0 catches the truncation window that
@@ -119,11 +135,18 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
   std::unique_ptr<std::atomic<long long>[]> seg_total_pf(new std::atomic<long long>[N]);
   std::unique_ptr<std::atomic<long long>[]> seg_done_pf(new std::atomic<long long>[N]);
   for(int i=0;i<N;i++){ seg_total_pf[i].store(0); seg_done_pf[i].store(0); }
+  // Per-file consumed-speech-samples counter (mirrors seg_done_pf EXACTLY: same lock-free
+  // atomic array, bumped in the same process_batch loop). Drives the per-file TIME-based
+  // bar (samples_done_pf/16000 / FilePstat.full_seconds). No new lock, no new race.
+  std::unique_ptr<std::atomic<long long>[]> samples_done_pf(new std::atomic<long long>[N]);
+  for(int i=0;i<N;i++) samples_done_pf[i].store(0);
   // Snapshot every file's (index, done, total) into bp.files for the per-file GUI bars.
   auto fill_files = [&](BatchProgress& bp){
     bp.files.reserve((size_t)N);
     for(int i=0;i<N;i++)
-      bp.files.push_back({i, seg_done_pf[i].load(), seg_total_pf[i].load()});
+      bp.files.push_back({i, seg_done_pf[i].load(), seg_total_pf[i].load(),
+                          file_full_seconds ? (*file_full_seconds)[i] : 0.0,
+                          samples_done_pf[i].load()});
   };
 
   // producers: decode + VAD; push SegTask; record failures
@@ -184,6 +207,10 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
   // With K==1 this is exactly the old single-timestamp throttle (the mutex is uncontended).
   std::mutex cb_mu;
   auto consumer_last_cb = std::chrono::steady_clock::time_point{};  // zero = never fired
+  // STEP 6: SEPARATE ~1s timestamp for the live 转写中 log line. Lives inside the SAME
+  // cb_mu critical section as consumer_last_cb (two cadences, one lock) so it is serialized
+  // identically — never floods the 5000-block GUI log (1 line/s ceiling, not ~6-7/s).
+  auto consumer_last_log = std::chrono::steady_clock::time_point{};
   // One reusable consumer body, parameterized by (recognizer, sink). Each Asr handle and
   // each sink is touched by EXACTLY ONE thread; a segment is pop'd from the shared queue
   // exactly once -> no double-processing across the K consumers (same contract as hetero).
@@ -207,6 +234,13 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
         seg_pending[b.file_id].fetch_sub(1);         // R6 fix: segment fully consumed
         segs_done.fetch_add(1);                      // segment-based progress: one segment routed
         seg_done_pf[b.file_id].fetch_add(1);         // per-file: this file's done grows too
+        samples_done_pf[b.file_id].fetch_add((long long)b.samples.size());  // per-file: consumed speech samples (time bar)
+        // STEP 7: log 转写:<file> ONCE when this file's first segment is routed. Take err_mu
+        // ONLY to test+set the flag, then RELEASE it before log_info (never fprintf+sink under
+        // the per-file mutex). Gives a 解码 -> 切分完成 -> 转写 -> 完成 arc per file.
+        bool first=false;
+        { std::lock_guard<std::mutex> lk(err_mu); if(!file_logged[b.file_id]){ file_logged[b.file_id]=1; first=true; } }
+        if(first) log_info(u8"转写: " + basename_utf8(inputs[b.file_id]));
       }
       // live progress: throttle to ~150 ms so we don't flood the GUI. Guarded by cb_mu so K
       // consumers share ONE throttle window (the snapshot reads atomics; the lock only
@@ -216,15 +250,30 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
         std::unique_lock<std::mutex> lk(cb_mu, std::try_to_lock);
         if(lk.owns_lock()){
           auto now = std::chrono::steady_clock::now();
+          // One snapshot of the shared atomics drives BOTH the 150ms bar cb AND the 1s log,
+          // so the log's numbers are the exact values that drove the bar (coherent by build).
+          BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
+          bp.audio_seconds_done=(double)samples_done.load()/16000.0;
+          bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
+          bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load();
           if(consumer_last_cb == std::chrono::steady_clock::time_point{} ||
              std::chrono::duration_cast<std::chrono::milliseconds>(now - consumer_last_cb).count() >= 150){
             consumer_last_cb = now;
-            BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
-            bp.audio_seconds_done=(double)samples_done.load()/16000.0;
-            bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
-            bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load();
             fill_files(bp);
             cb(bp);
+          }
+          // STEP 6: live density line on a SEPARATE ~1s cadence (consumer_last_log), still
+          // inside this same cb_mu lock so the timestamp is serialized exactly like
+          // consumer_last_cb. MUST NOT move outside the lock (would race across consumers).
+          if(consumer_last_log == std::chrono::steady_clock::time_point{} ||
+             std::chrono::duration_cast<std::chrono::milliseconds>(now - consumer_last_log).count() >= 1000){
+            consumer_last_log = now;
+            double el = std::chrono::duration<double>(now - t0).count();
+            double x  = el > 0 ? bp.audio_seconds_done / el : 0.0;
+            double eta = bp.segs_done > 0
+              ? el * (double)(bp.segs_total - bp.segs_done) / (double)bp.segs_done : 0.0;
+            log_info(u8"转写中 " + std::to_string(bp.segs_done) + "/" + std::to_string(bp.segs_total)
+                     + u8" 段 · " + fmt1(x) + "x · " + u8"剩余~" + mmss(eta));
           }
         }
       }
@@ -308,11 +357,15 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
 // thread; a single segment is pop'd exactly once -> no double-processing.
 // ---------------------------------------------------------------------------
 std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::string>& inputs,
-    const EngineConfig& cfg, const AutoTune& tune, ProgressCb cb, CancelToken* cancel){
+    const EngineConfig& cfg, const AutoTune& tune, ProgressCb cb, CancelToken* cancel,
+    const std::vector<double>* file_full_seconds){
   const int N=(int)inputs.size();
   std::vector<FileResult> results(N);
   for(int i=0;i<N;i++){ results[i].input=inputs[i]; results[i].ok=true; }
   if(N==0) return results;
+
+  // STEP 6: wall-clock origin for the live 转写中 line's elapsed/speed (consumer-side).
+  auto t0 = std::chrono::steady_clock::now();
 
   // Build TWO recognizers, CPU first then CUDA (deterministic per H0).
   EngineConfig cpu_cfg = cfg; cpu_cfg.provider=Provider::Cpu; cpu_cfg.num_threads=std::max(1,tune.cpu_asr_threads);
@@ -339,6 +392,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   // Two token sinks: each consumer writes ONLY its own (hot path lock-free).
   std::vector<std::vector<Token>> tok_cpu(N), tok_gpu(N);
   std::vector<char> produced_complete(N,0);          // R6
+  std::vector<char> file_logged(N,0);                // STEP 7: 转写:<file> logged once when seg_done_pf 0->1 (guarded by err_mu)
   // R6 fix: per-file pending-segment counter (same semantics as single path).
   // Producer increments before push; consumer decrements after routing. On cancel,
   // the discarded `first` is never decremented -> seg_pending > 0 catches truncation.
@@ -365,10 +419,16 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   std::unique_ptr<std::atomic<long long>[]> seg_total_pf(new std::atomic<long long>[N]);
   std::unique_ptr<std::atomic<long long>[]> seg_done_pf(new std::atomic<long long>[N]);
   for(int i=0;i<N;i++){ seg_total_pf[i].store(0); seg_done_pf[i].store(0); }
+  // Per-file consumed-speech-samples counter (mirrors seg_done_pf EXACTLY). Either consumer
+  // bumps element [file_id] atomically — no new race vs the per-file seg counters.
+  std::unique_ptr<std::atomic<long long>[]> samples_done_pf(new std::atomic<long long>[N]);
+  for(int i=0;i<N;i++) samples_done_pf[i].store(0);
   auto fill_files = [&](BatchProgress& bp){
     bp.files.reserve((size_t)N);
     for(int i=0;i<N;i++)
-      bp.files.push_back({i, seg_done_pf[i].load(), seg_total_pf[i].load()});
+      bp.files.push_back({i, seg_done_pf[i].load(), seg_total_pf[i].load(),
+                          file_full_seconds ? (*file_full_seconds)[i] : 0.0,
+                          samples_done_pf[i].load()});
   };
 
   // producers: identical to the single path.
@@ -422,6 +482,9 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
   // the CPU consumer passes oom_retry=false and keeps its exact prior behaviour.
   std::atomic<bool> cb_lock{false};                  // tiny spinlock to serialize the throttled cb
   auto consumer_last_cb = std::chrono::steady_clock::time_point{};
+  // STEP 6: SEPARATE ~1s timestamp for the live 转写中 line, serialized inside the SAME
+  // cb_lock spinlock as consumer_last_cb (two cadences, one critical section, no extra lock).
+  auto consumer_last_log = std::chrono::steady_clock::time_point{};
   auto consume = [&](Asr& asr, int batch_max, std::vector<std::vector<Token>>& sink,
                      std::atomic<long long>& seg_counter, bool oom_retry){
     // P5: transcribe one already-formed batch -> route -> bump counters -> live cb. Same
@@ -442,20 +505,46 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
         seg_pending[b.file_id].fetch_sub(1);         // R6 fix: segment fully consumed
         segs_done.fetch_add(1);                      // segment-based progress: one segment routed
         seg_done_pf[b.file_id].fetch_add(1);         // per-file: this file's done grows too
+        samples_done_pf[b.file_id].fetch_add((long long)b.samples.size());  // per-file: consumed speech samples (time bar)
+        // STEP 7: log 转写:<file> ONCE when this file's first segment is routed by EITHER
+        // consumer. err_mu test+set, RELEASED before log_info (never log under the mutex).
+        bool first=false;
+        { std::lock_guard<std::mutex> lk(err_mu); if(!file_logged[b.file_id]){ file_logged[b.file_id]=1; first=true; } }
+        if(first) log_info(u8"转写: " + basename_utf8(inputs[b.file_id]));
       }
       seg_counter += (long long)batch.size();        // H9: count segments processed by this consumer
       if(cb && !cb_lock.exchange(true)){              // best-effort throttled live cb
         auto now = std::chrono::steady_clock::now();
+        // One snapshot drives BOTH the 150ms bar cb AND the 1s log (coherent by build).
+        BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
+        bp.audio_seconds_done=(double)samples_done.load()/16000.0;
+        bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
+        bp.cpu_segs=cpu_segs.load(); bp.gpu_segs=gpu_segs.load();   // G14: live split
+        bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load();
         if(consumer_last_cb == std::chrono::steady_clock::time_point{} ||
            std::chrono::duration_cast<std::chrono::milliseconds>(now - consumer_last_cb).count() >= 150){
           consumer_last_cb = now;
-          BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
-          bp.audio_seconds_done=(double)samples_done.load()/16000.0;
-          bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
-          bp.cpu_segs=cpu_segs.load(); bp.gpu_segs=gpu_segs.load();   // G14: live split
-          bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load();
           fill_files(bp);
           cb(bp);
+        }
+        // STEP 6: live density line on a SEPARATE ~1s cadence, still inside cb_lock so the
+        // timestamp is serialized exactly like consumer_last_cb. Hetero variant appends the
+        // CPU/GPU split from bp.cpu_segs/gpu_segs. MUST NOT move outside the spinlock.
+        if(consumer_last_log == std::chrono::steady_clock::time_point{} ||
+           std::chrono::duration_cast<std::chrono::milliseconds>(now - consumer_last_log).count() >= 1000){
+          consumer_last_log = now;
+          double el = std::chrono::duration<double>(now - t0).count();
+          double x  = el > 0 ? bp.audio_seconds_done / el : 0.0;
+          double eta = bp.segs_done > 0
+            ? el * (double)(bp.segs_total - bp.segs_done) / (double)bp.segs_done : 0.0;
+          std::string line = u8"转写中 " + std::to_string(bp.segs_done) + "/" + std::to_string(bp.segs_total)
+                           + u8" 段 · " + fmt1(x) + "x · " + u8"剩余~" + mmss(eta);
+          long long tot = bp.cpu_segs + bp.gpu_segs;
+          if(tot > 0){
+            int cpu_pct = (int)(bp.cpu_segs * 100 / tot);
+            line += u8" · CPU " + std::to_string(cpu_pct) + "%/GPU " + std::to_string(100 - cpu_pct) + "%";
+          }
+          log_info(line);
         }
         cb_lock.store(false);
       }
@@ -539,9 +628,10 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
 }  // namespace
 
 std::vector<FileResult> transcribe_batch_files(const std::vector<std::string>& inputs,
-    const EngineConfig& cfg, const AutoTune& tune, ProgressCb cb, CancelToken* cancel){
+    const EngineConfig& cfg, const AutoTune& tune, ProgressCb cb, CancelToken* cancel,
+    const std::vector<double>* file_full_seconds){
   if(tune.provider == Provider::Hetero)
-    return transcribe_batch_files_hetero(inputs, cfg, tune, cb, cancel);
-  return transcribe_batch_files_single(inputs, cfg, tune, cb, cancel);
+    return transcribe_batch_files_hetero(inputs, cfg, tune, cb, cancel, file_full_seconds);
+  return transcribe_batch_files_single(inputs, cfg, tune, cb, cancel, file_full_seconds);
 }
 }  // namespace suji
