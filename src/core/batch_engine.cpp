@@ -229,6 +229,10 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
 
   // finalize per file (single-threaded): sort tokens by time -> merge -> punctuate
   Punctuator punct(cfg);
+  // Qwen3-ASR is an LLM decoder that EMITS ITS OWN punctuation; running the CT-transformer
+  // punct pass on top of it doubles every mark (。。 / ，，). Detect Qwen3 via its encoder
+  // field and skip the redundant pass (also one less model pass). AED/CTC keep punctuating.
+  const bool self_punct = !cfg.qwen3_encoder.empty();
   for(int i=0;i<N;i++){
     // R6 fix: use seg_pending (consumption tracking) in addition to produced_complete.
     // seg_pending[i] > 0 catches the window where all segs were pushed (produced_complete=1)
@@ -242,7 +246,7 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
     if(results[i].ok){
       Transcript tr;
       tr.segments = merge_file_tokens(std::move(file_tokens[i]), cfg.merge_gap, cfg.merge_max_dur);
-      for(auto& seg : tr.segments){ seg.text = punct.add(seg.text); tr.full_text += seg.text; }
+      for(auto& seg : tr.segments){ seg.text = self_punct ? seg.text : punct.add(seg.text); tr.full_text += seg.text; }
       results[i].transcript = std::move(tr);
       log_info("完成: " + basename_utf8(inputs[i]) + " (" + std::to_string(results[i].transcript.segments.size()) + " 段)");  // C1
     }
@@ -460,6 +464,9 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
 
   // finalize per file: merge tok_cpu[i] + tok_gpu[i] -> sort -> merge -> punctuate.
   Punctuator punct(cfg);
+  // Qwen3-ASR self-punctuates (LLM decoder); skip the CT-transformer pass to avoid doubled
+  // marks (。。 / ，，). Same detection + rationale as the single path. AED/CTC keep punctuating.
+  const bool self_punct = !cfg.qwen3_encoder.empty();
   for(int i=0;i<N;i++){
     // R6 fix: seg_pending[i] > 0 catches the truncation window where all segs were
     // pushed (produced_complete=1) but tail segs are still queued or were the
@@ -475,7 +482,7 @@ std::vector<FileResult> transcribe_batch_files_hetero(const std::vector<std::str
                               std::make_move_iterator(tok_gpu[i].end()));
       Transcript tr;
       tr.segments = merge_file_tokens(std::move(toks), cfg.merge_gap, cfg.merge_max_dur);
-      for(auto& seg : tr.segments){ seg.text = punct.add(seg.text); tr.full_text += seg.text; }
+      for(auto& seg : tr.segments){ seg.text = self_punct ? seg.text : punct.add(seg.text); tr.full_text += seg.text; }
       results[i].transcript = std::move(tr);
       log_info("完成: " + basename_utf8(inputs[i]) + " (" + std::to_string(results[i].transcript.segments.size()) + " 段)");  // C1
     }
