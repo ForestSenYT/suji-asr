@@ -695,12 +695,28 @@ MainWindow::MainWindow(QWidget* parent)
     auto* settingsRow = new QHBoxLayout;
     settingsRow->setSpacing(12);
 
+    // 转写模式 (transcription-quality preset): picks the model + recommended backend.
+    // Default = 准确度(Qwen3). The 推理后端 combo below is an ADVANCED override.
+    auto* modeLabel = new QLabel(tr("转写模式:"), bottomWidget);
+    m_mode = new QComboBox(bottomWidget);
+    m_mode->addItem(tr("准确度(Qwen3)"));   // index 0 = Mode::Qwen3 (default)
+    m_mode->addItem(tr("速度(AED)"));        // index 1 = Mode::Aed
+    m_mode->addItem(tr("词级字幕(CTC)"));    // index 2 = Mode::Ctc
+    m_mode->setItemData(0, tr("Qwen3 模型,最准确(人名 + 中英混),默认在 CPU 上运行。"), Qt::ToolTipRole);
+    m_mode->setItemData(1, tr("fp16 AED 模型,最快但精度略低,需要 CUDA GPU。"), Qt::ToolTipRole);
+    m_mode->setItemData(2, tr("int8 CTC 模型,带逐字时间戳,适合精细字幕对齐。"), Qt::ToolTipRole);
+    m_mode->setToolTip(tr("转写模式:准确度(Qwen3) / 速度(AED) / 词级字幕(CTC)。"
+                          "模式决定使用的模型与推荐后端;下方「推理后端」为高级覆盖。"));
+    m_mode->setCurrentIndex(0);
+
     auto* providerLabel = new QLabel(tr("推理后端:"), bottomWidget);
     m_provider = new QComboBox(bottomWidget);
     m_provider->addItem(QStringLiteral("auto"));
     m_provider->addItem(QStringLiteral("cpu"));
     m_provider->addItem(QStringLiteral("cuda"));
     m_provider->addItem(QStringLiteral("hetero"));
+    m_provider->setToolTip(tr("推理后端(高级):auto 跟随所选转写模式的推荐后端;"
+                              "选 cpu/cuda/hetero 则覆盖模式默认。"));
 
     m_chkSrt  = new QCheckBox(QStringLiteral("SRT"),  bottomWidget);
     m_chkVtt  = new QCheckBox(QStringLiteral("VTT"),  bottomWidget);
@@ -724,6 +740,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_spnInFlight->setValue(0);
     m_spnInFlight->setToolTip(tr("并行文件 (0=自动)"));
 
+    settingsRow->addWidget(modeLabel);
+    settingsRow->addWidget(m_mode);
+    settingsRow->addSpacing(16);
     settingsRow->addWidget(providerLabel);
     settingsRow->addWidget(m_provider);
     settingsRow->addSpacing(16);
@@ -960,7 +979,8 @@ void MainWindow::onStart()
         Q_ARG(bool,        wantJson()),
         Q_ARG(bool,        wantMd()),
         Q_ARG(int,         batchOverride()),
-        Q_ARG(int,         inFlightOverride())
+        Q_ARG(int,         inFlightOverride()),
+        Q_ARG(int,         mode())
     );
 }
 
@@ -1520,6 +1540,7 @@ QStringList MainWindow::inputFiles() const
 
 QString MainWindow::outputDir() const  { return m_outputDir; }
 QString MainWindow::provider() const   { return m_provider->currentText(); }
+int     MainWindow::mode() const       { return m_mode ? m_mode->currentIndex() : 0; }
 bool    MainWindow::wantSrt()  const   { return m_chkSrt->isChecked(); }
 bool    MainWindow::wantVtt()  const   { return m_chkVtt->isChecked(); }
 bool    MainWindow::wantJson() const   { return m_chkJson->isChecked(); }
@@ -1537,6 +1558,13 @@ void MainWindow::loadSettings()
     const QString prov = s.value(QStringLiteral("gui/provider"), QStringLiteral("auto")).toString();
     int idx = m_provider->findText(prov);
     if (idx >= 0) m_provider->setCurrentIndex(idx);
+
+    // 转写模式 (default 0 = 准确度(Qwen3)); clamp to the valid index range.
+    if (m_mode) {
+        int mIdx = s.value(QStringLiteral("gui/mode"), 0).toInt();
+        if (mIdx < 0 || mIdx >= m_mode->count()) mIdx = 0;
+        m_mode->setCurrentIndex(mIdx);
+    }
 
     // format checkboxes (default all on)
     m_chkSrt ->setChecked(s.value(QStringLiteral("gui/srt"),  true).toBool());
@@ -1560,6 +1588,7 @@ void MainWindow::saveSettings()
 {
     QSettings s;
     s.setValue(QStringLiteral("gui/provider"),          m_provider->currentText());
+    if (m_mode) s.setValue(QStringLiteral("gui/mode"),  m_mode->currentIndex());
     s.setValue(QStringLiteral("gui/srt"),               m_chkSrt->isChecked());
     s.setValue(QStringLiteral("gui/vtt"),               m_chkVtt->isChecked());
     s.setValue(QStringLiteral("gui/json"),              m_chkJson->isChecked());

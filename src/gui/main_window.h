@@ -34,6 +34,7 @@ public:
     QStringList inputFiles() const;
     QString     outputDir() const;
     QString     provider() const;   // "auto" | "cpu" | "cuda" | "hetero"
+    int         mode() const;       // 转写模式: 0=Qwen3(准确度) 1=AED(速度) 2=CTC(词级字幕)
     bool        wantSrt()  const;
     bool        wantVtt()  const;
     bool        wantJson() const;
@@ -139,6 +140,7 @@ private:
     QProgressBar*       m_progress    = nullptr;
     QLabel*             m_statusLabel = nullptr;
     QComboBox*          m_provider    = nullptr;
+    QComboBox*          m_mode        = nullptr;  // 转写模式: 准确度(Qwen3)/速度(AED)/词级字幕(CTC)
     QCheckBox*          m_chkSrt      = nullptr;
     QCheckBox*          m_chkVtt      = nullptr;
     QCheckBox*          m_chkJson     = nullptr;

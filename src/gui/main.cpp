@@ -60,7 +60,8 @@ int main(int argc, char** argv)
                 QStringLiteral("build/gui_selftest"),
                 QStringLiteral("auto"),
                 true, true, true, true,
-                0, 0  // G12: batchOverride=auto, inFlightOverride=auto
+                0, 0,  // G12: batchOverride=auto, inFlightOverride=auto
+                2      // mode=CTC: exercise the shipped int8-CTC default (no Qwen3/fp16 dev model)
             );
         });
 
@@ -116,7 +117,8 @@ int main(int argc, char** argv)
             Q_ARG(bool, false),
             Q_ARG(bool, false),
             Q_ARG(int, 0),   // G12: batchOverride=auto
-            Q_ARG(int, 0)    // G12: inFlightOverride=auto
+            Q_ARG(int, 0),   // G12: inFlightOverride=auto
+            Q_ARG(int, 2)    // mode=CTC: shipped int8-CTC default
         );
 
         // After 1500ms, call requestCancel() DIRECTLY from this (main) thread —
@@ -171,7 +173,8 @@ int main(int argc, char** argv)
             Q_ARG(QString, QStringLiteral("build/st_thread")),
             Q_ARG(QString, QStringLiteral("auto")),
             Q_ARG(bool, true), Q_ARG(bool, true), Q_ARG(bool, true), Q_ARG(bool, true),
-            Q_ARG(int, 0), Q_ARG(int, 0));  // G12: batchOverride=auto, inFlightOverride=auto
+            Q_ARG(int, 0), Q_ARG(int, 0),  // G12: batchOverride=auto, inFlightOverride=auto
+            Q_ARG(int, 2));                // mode=CTC: shipped int8-CTC default
         app.exec();
         workerThread.quit();
         workerThread.wait();
@@ -261,8 +264,8 @@ int main(int argc, char** argv)
         win.setProgress(55);
         win.setStatusText(QString::fromUtf8("处理中 55%  1/4 文件  已转写 96/174 段  6.2 倍速  剩余约 00:48"));
 
-        win.appendLogLine(QStringLiteral("INFO"), QString::fromUtf8("GUI engine: provider=cuda"));
-        win.appendLogLine(QStringLiteral("INFO"), QString::fromUtf8("using fp16 AED model on GPU (faster + more accurate than int8)"));
+        win.appendLogLine(QStringLiteral("INFO"), QString::fromUtf8("使用 Qwen3 模型(准确度优先)"));
+        win.appendLogLine(QStringLiteral("INFO"), QString::fromUtf8("GUI engine: provider=cpu"));
         win.appendLogLine(QStringLiteral("INFO"), QString::fromUtf8("解码 会议录像_2026.mp4"));
         win.appendLogLine(QStringLiteral("OK"),   QString::fromUtf8("完成: 会议录像_2026.mp4 (128 段)"));
         win.appendLogLine(QStringLiteral("INFO"), QString::fromUtf8("转写 lecture-part-2.mkv  62%"));
