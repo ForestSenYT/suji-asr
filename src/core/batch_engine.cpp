@@ -10,6 +10,7 @@
 #include "core/log.h"
 #include <thread>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <algorithm>
 #include <chrono>
@@ -70,11 +71,28 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
   // recognizer config reflects the tuned provider/threads
   EngineConfig ecfg = cfg; ecfg.provider = tune.provider;
   ecfg.num_threads = (tune.provider==Provider::Cuda) ? 1 : tune.num_threads;
-  Asr asr(ecfg);
-  if(!asr.ok()){ for(auto& r:results){ r.ok=false; r.err="ASR init failed"; } return results; }
+
+  // Data-parallel CPU consumers (Qwen3): build K independent Asr handles, each draining
+  // the ONE shared queue into its OWN token sink. K=1 is the original single-consumer
+  // path (one handle, one sink) byte-for-byte. CUDA never sets cpu_consumers>1, so the
+  // GPU OOM-retry path below stays single-consumer. Graceful degradation: if some handles
+  // fail to init we run with fewer; if ALL fail we mark every file failed (as before).
+  const int K = std::max(1, tune.cpu_consumers);
+  std::vector<std::unique_ptr<Asr>> asrs;
+  asrs.reserve((size_t)K);
+  for(int k=0;k<K;k++){
+    auto a = std::make_unique<Asr>(ecfg);
+    if(a->ok()) asrs.push_back(std::move(a));
+    else log_err("consumer " + std::to_string(k) + ": ASR init failed; degrading consumer count");
+  }
+  if(asrs.empty()){ for(auto& r:results){ r.ok=false; r.err="ASR init failed"; } return results; }
+  const int kc = (int)asrs.size();   // actual consumer count after degradation
 
   BoundedQueue<SegTask> queue((size_t)std::max(4, tune.batch*4));
-  std::vector<std::vector<Token>> file_tokens(N);   // consumer-only (no lock)
+  // One token sink PER consumer (indexed [k][file_id]); each consumer writes ONLY its own
+  // (hot path lock-free). Concatenated per file at finalize, then stable-sorted by time in
+  // merge_file_tokens — same K-sink merge pattern the hetero path uses for its 2 sinks.
+  std::vector<std::vector<std::vector<Token>>> sinks((size_t)kc, std::vector<std::vector<Token>>(N));
   std::vector<char> produced_complete(N,0);          // R6: set when ALL of a file's segs pushed
   // R6 fix: per-file pending-segment counter. Incremented by producer BEFORE push,
   // decremented by consumer AFTER routing tokens. On cancel the discarded `first`
@@ -156,12 +174,20 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
       }
     });
   }
-  // consumer: batch decode, route tokens by file_id
+  // consumers: batch decode, route tokens by file_id into each consumer's OWN sink.
   // G2: the cuda-only single path gets OOM halve-retry; the CPU path keeps its exact
   // prior behaviour (a plain transcribe_batch call, no retry) so CPU is unaffected.
+  // CUDA never runs >1 consumer (cpu_consumers is CPU-only), so gpu_retry implies kc==1.
   const bool gpu_retry = (tune.provider == Provider::Cuda);
+  // Shared progress throttle across all K consumers: ONE mutex-guarded last-cb timestamp
+  // so the consumers don't each fire the cb (any consumer may fire when ~150 ms is due).
+  // With K==1 this is exactly the old single-timestamp throttle (the mutex is uncontended).
+  std::mutex cb_mu;
   auto consumer_last_cb = std::chrono::steady_clock::time_point{};  // zero = never fired
-  std::thread consumer([&]{
+  // One reusable consumer body, parameterized by (recognizer, sink). Each Asr handle and
+  // each sink is touched by EXACTLY ONE thread; a segment is pop'd from the shared queue
+  // exactly once -> no double-processing across the K consumers (same contract as hetero).
+  auto consume = [&](Asr& asr, std::vector<std::vector<Token>>& sink){
     // P5: transcribe one already-formed batch -> route tokens -> bump counters -> live cb.
     // Identical work whether the batch came from a mid-run emit or the EOF flush, so it
     // lives in one place to keep R3/R6 bookkeeping in exactly one spot.
@@ -175,25 +201,31 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
         mark_batch_failed(batch, res.size(), results, err_mu);
         return;
       }
-      route_batch_tokens(batch, res, file_tokens);
+      route_batch_tokens(batch, res, sink);
       for(auto& b : batch){
         samples_done += b.samples.size();
         seg_pending[b.file_id].fetch_sub(1);         // R6 fix: segment fully consumed
         segs_done.fetch_add(1);                      // segment-based progress: one segment routed
         seg_done_pf[b.file_id].fetch_add(1);         // per-file: this file's done grows too
       }
-      // live progress: throttle to ~150 ms so we don't flood the GUI
+      // live progress: throttle to ~150 ms so we don't flood the GUI. Guarded by cb_mu so K
+      // consumers share ONE throttle window (the snapshot reads atomics; the lock only
+      // serializes the timestamp check + the cb call). try_lock keeps a busy consumer from
+      // blocking on the cb — if another consumer holds it, this one just skips this update.
       if(cb){
-        auto now = std::chrono::steady_clock::now();
-        if(consumer_last_cb == std::chrono::steady_clock::time_point{} ||
-           std::chrono::duration_cast<std::chrono::milliseconds>(now - consumer_last_cb).count() >= 150){
-          consumer_last_cb = now;
-          BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
-          bp.audio_seconds_done=(double)samples_done.load()/16000.0;
-          bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
-          bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load();
-          fill_files(bp);
-          cb(bp);
+        std::unique_lock<std::mutex> lk(cb_mu, std::try_to_lock);
+        if(lk.owns_lock()){
+          auto now = std::chrono::steady_clock::now();
+          if(consumer_last_cb == std::chrono::steady_clock::time_point{} ||
+             std::chrono::duration_cast<std::chrono::milliseconds>(now - consumer_last_cb).count() >= 150){
+            consumer_last_cb = now;
+            BatchProgress bp; bp.files_total=N; bp.files_done=files_done.load();
+            bp.audio_seconds_done=(double)samples_done.load()/16000.0;
+            bp.total_audio_decoded=(double)decoded_samples.load()/16000.0;
+            bp.segs_done=segs_done.load(); bp.segs_total=segs_total.load();
+            fill_files(bp);
+            cb(bp);
+          }
         }
       }
     };
@@ -222,10 +254,16 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
     if(!broke_on_cancel)                             // clean EOF (drained naturally): flush remainder, never drop a held segment
       for(auto b = flush_held(bmax, hold, len_of); !b.empty(); b = flush_held(bmax, hold, len_of))
         process_batch(std::move(b));
-  });
+  };
+  // Spawn kc consumer threads, each bound to its own Asr handle + own sink. kc==1 is the
+  // original single-consumer path (one thread, one sink) with no behaviour change.
+  std::vector<std::thread> consumers;
+  consumers.reserve((size_t)kc);
+  for(int k=0;k<kc;k++)
+    consumers.emplace_back([&,k]{ consume(*asrs[k], sinks[k]); });
   for(auto& p:producers) p.join();
   queue.close();
-  consumer.join();
+  for(auto& c:consumers) c.join();
 
   // finalize per file (single-threaded): sort tokens by time -> merge -> punctuate
   Punctuator punct(cfg);
@@ -244,8 +282,15 @@ std::vector<FileResult> transcribe_batch_files_single(const std::vector<std::str
       results[i].ok = false; results[i].err = "cancelled";
     }
     if(results[i].ok){
+      // Concat this file's tokens across ALL kc consumer sinks, then merge_file_tokens
+      // stable-sorts by time -> ordering across consumers is correct (same as hetero's
+      // tok_cpu+tok_gpu concat). kc==1 is just a single move of sinks[0][i] (no extra copy).
+      std::vector<Token> toks = std::move(sinks[0][i]);
+      for(int k=1;k<kc;k++)
+        toks.insert(toks.end(), std::make_move_iterator(sinks[k][i].begin()),
+                                std::make_move_iterator(sinks[k][i].end()));
       Transcript tr;
-      tr.segments = merge_file_tokens(std::move(file_tokens[i]), cfg.merge_gap, cfg.merge_max_dur);
+      tr.segments = merge_file_tokens(std::move(toks), cfg.merge_gap, cfg.merge_max_dur);
       for(auto& seg : tr.segments){ seg.text = self_punct ? seg.text : punct.add(seg.text); tr.full_text += seg.text; }
       results[i].transcript = std::move(tr);
       log_info("完成: " + basename_utf8(inputs[i]) + " (" + std::to_string(results[i].transcript.segments.size()) + " 段)");  // C1
