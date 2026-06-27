@@ -28,11 +28,20 @@ Asr::Asr(const EngineConfig& cfg) {
   SherpaOnnxOfflineRecognizerConfig c; std::memset(&c, 0, sizeof(c));
   c.feat_config.sample_rate = 16000;
   c.feat_config.feature_dim = 80;
-  // P1: select AED (encoder/decoder) vs CTC (single model). When both AED paths
-  // are set, use fire_red_asr + model_type="fire_red_asr"; otherwise keep the
+  // Model selection precedence: Qwen3-ASR > FireRedASR AED > FireRedASR CTC.
+  // Qwen3 (model_type="qwen3_asr") wins when BOTH its encoder and decoder are set;
+  // it uses a tokenizer DIRECTORY (vocab.json), NOT tokens.txt. Otherwise: when both
+  // AED paths are set, use fire_red_asr + model_type="fire_red_asr"; else keep the
   // default CTC path (model_type left unset so sherpa auto-detects fire_red_asr_ctc).
-  const bool use_aed = !cfg.asr_encoder.empty() && !cfg.asr_decoder.empty();
-  if (use_aed) {
+  const bool use_qwen3 = !cfg.qwen3_encoder.empty() && !cfg.qwen3_decoder.empty();
+  const bool use_aed   = !cfg.asr_encoder.empty()   && !cfg.asr_decoder.empty();
+  if (use_qwen3) {
+    c.model_config.qwen3_asr.conv_frontend = cfg.qwen3_conv_frontend.c_str();
+    c.model_config.qwen3_asr.encoder       = cfg.qwen3_encoder.c_str();
+    c.model_config.qwen3_asr.decoder       = cfg.qwen3_decoder.c_str();
+    c.model_config.qwen3_asr.tokenizer     = cfg.qwen3_tokenizer.c_str();
+    c.model_config.model_type = "qwen3_asr";
+  } else if (use_aed) {
     c.model_config.fire_red_asr.encoder = cfg.asr_encoder.c_str();
     c.model_config.fire_red_asr.decoder = cfg.asr_decoder.c_str();
     c.model_config.model_type = "fire_red_asr";

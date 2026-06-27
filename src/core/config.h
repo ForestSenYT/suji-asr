@@ -17,6 +17,13 @@ struct EngineConfig {
   // otherwise it falls back to the fire_red_asr_ctc (single model) path.
   std::string asr_encoder;     // AED encoder.onnx (e.g. encoder.fp16.onnx)
   std::string asr_decoder;     // AED decoder.onnx (e.g. decoder.fp16.onnx)
+  // Qwen3-ASR (sherpa model_type="qwen3_asr"). If qwen3_encoder AND qwen3_decoder
+  // are both non-empty, asr.cpp uses the qwen3_asr config with PRECEDENCE over the
+  // AED/CTC paths. Tokenizer is a DIRECTORY (containing vocab.json), not tokens.txt.
+  std::string qwen3_conv_frontend; // conv-frontend.onnx
+  std::string qwen3_encoder;       // encoder(.int8).onnx
+  std::string qwen3_decoder;       // decoder(.int8).onnx (with KV cache)
+  std::string qwen3_tokenizer;     // tokenizer DIR containing vocab.json
   std::string tokens;          // tokens.txt
   std::string vad_model;       // silero_vad.onnx
   std::string punct_model;     // CT punct model.int8.onnx
