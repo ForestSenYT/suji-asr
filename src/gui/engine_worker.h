@@ -3,7 +3,9 @@
 #include <QStringList>
 #include <QString>
 #include <atomic>
+#include <mutex>
 #include "core/cancel.h"
+#include "core/hardware.h"
 
 namespace suji {
 
@@ -26,6 +28,15 @@ public slots:
              int mode = 0 /*Mode::Qwen3*/);
     void requestCancel(); // thread-safe: direct atomic store, callable from any thread
 
+    // STARTUP (STEP 10): cache a hardware probe so the FIRST Start doesn't stall on
+    // nvidia-smi (WaitForSingleObject INFINITE). MainWindow kicks setCachedHardware() from a
+    // one-shot background thread after show(); run() reads it via cachedHardware() IF ready,
+    // otherwise falls back to an inline probe_hardware() so an early Start never regresses.
+    // Thread-safety: a mutex guards the HardwareInfo + an atomic ready flag, so the background
+    // writer and the run()-thread reader never race on a half-written struct.
+    void setCachedHardware(const HardwareInfo& hw);   // called from the background probe thread
+    bool cachedHardware(HardwareInfo& out) const;     // true (+fills out) if the probe finished
+
 signals:
     void started(QString provider, int filesTotal);
     // cpuSegs/gpuSegs: live hetero CPU/GPU segment split (0/0 for single-provider paths).
@@ -44,6 +55,11 @@ signals:
 private:
     CancelToken cancel_;
     std::atomic<bool> running_{false}; // re-entrancy guard
+
+    // STEP 10: cached hardware probe (written by the background probe, read by run()).
+    mutable std::mutex     hw_mu_;
+    HardwareInfo           hw_cached_;
+    std::atomic<bool>      hw_ready_{false};
 };
 
 } // namespace suji

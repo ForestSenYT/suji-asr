@@ -141,7 +141,12 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     // ------------------------------------------------------------------
     // Hardware probe + adaptive provider selection
     // ------------------------------------------------------------------
-    HardwareInfo hw   = probe_hardware();
+    // STEP 10: use the cached probe if the background probe (kicked after show()) finished,
+    // so the FIRST Start doesn't stall on nvidia-smi. If it hasn't completed yet, probe
+    // inline (the original behaviour) so nothing regresses.
+    HardwareInfo hw;
+    if (!cachedHardware(hw))
+        hw = probe_hardware();
     AutoTune     tune = decide(hw, c);
 
     // Honor the UI provider combo: "auto" keeps decide()'s choice.
@@ -326,11 +331,16 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     // ------------------------------------------------------------------
     auto t0 = std::chrono::steady_clock::now();
 
-    // Probe total audio duration for determinate progress (only todo files)
+    // Probe total audio duration for determinate progress (only todo files). Also keep the
+    // PER-FILE durations (aligned to `todo`, the engine's inputs vector) so the engine can
+    // populate FilePstat.full_seconds for the stable per-file time-based bars. A failed probe
+    // (d<=0) leaves that file's entry at 0 -> its per-file bar falls back to indeterminate.
     double totalAudio = 0.0;
-    for (const std::string& f : todo) {
+    std::vector<double> fileDur(todo.size(), 0.0);
+    for (size_t i = 0; i < todo.size(); ++i) {
         if (cancel_.is_cancelled()) break;   // abort probing fast on cancel
-        double d = probe_duration_seconds(ffprobe_path(), f);
+        double d = probe_duration_seconds(ffprobe_path(), todo[i]);
+        fileDur[i] = (d > 0.0) ? d : 0.0;
         if (d > 0.0) totalAudio += d;
     }
     log_info("total audio to transcribe: " + std::to_string(static_cast<int>(totalAudio)) + "s");
@@ -349,14 +359,22 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
             // registered metatypes, so the queued cross-thread delivery is safe.
             for (const FilePstat& fp : b.files) {
                 if (fp.file_index < 0 || fp.file_index >= (int)todo.size()) continue;
-                int percent = (fp.segs_total > 0)
-                    ? std::min(100, (int)(100 * fp.segs_done / fp.segs_total))
-                    : 0;
+                // Per-file bar uses the STABLE time metric: done-speech-seconds /
+                // this file's FIXED full duration. full_seconds<=0 (ffprobe failed) ->
+                // keep 0 (indeterminate). segs_done/segs_total still drive the 段数 text
+                // and the 解码中/转写中 phase in onFileProgress/filePhaseStr (unchanged).
+                int percent;
+                if (fp.full_seconds > 0.0) {
+                    percent = std::min(100, (int)(100.0 * (fp.samples_done_pf / 16000.0) / fp.full_seconds));
+                } else {
+                    percent = 0;
+                }
                 emit fileProgress(QString::fromUtf8(todo[fp.file_index].c_str()),
                                   percent, (int)fp.segs_done, (int)fp.segs_total);
             }
         },
-        &cancel_
+        &cancel_,
+        &fileDur
     );
 
     double wallSec = std::chrono::duration<double>(
@@ -440,6 +458,28 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
 void EngineWorker::requestCancel()
 {
     cancel_.cancel();
+}
+
+// STEP 10: store the background hardware probe result. The mutex guards the struct write;
+// hw_ready_ is published AFTER the struct is fully written (release/acquire via the mutex +
+// the atomic store), so a concurrent cachedHardware() never sees a half-written struct.
+void EngineWorker::setCachedHardware(const HardwareInfo& hw)
+{
+    {
+        std::lock_guard<std::mutex> lk(hw_mu_);
+        hw_cached_ = hw;
+    }
+    hw_ready_.store(true);
+}
+
+// STEP 10: read the cached probe. Returns false (and leaves out untouched) until the
+// background probe has published a result, so run() falls back to an inline probe.
+bool EngineWorker::cachedHardware(HardwareInfo& out) const
+{
+    if (!hw_ready_.load()) return false;
+    std::lock_guard<std::mutex> lk(hw_mu_);
+    out = hw_cached_;
+    return true;
 }
 
 } // namespace suji

@@ -1,6 +1,7 @@
 #include "gui/main_window.h"
 #include "gui/engine_worker.h"
 #include "core/log.h"
+#include "core/hardware.h"   // STEP 10: background probe_hardware() to warm the cache
 
 #include <QAction>
 #include <QApplication>
@@ -58,6 +59,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>   // STEP 10: detached background hardware-probe thread
 
 namespace suji {
 
@@ -710,13 +712,21 @@ MainWindow::MainWindow(QWidget* parent)
                           "模式决定使用的模型与推荐后端;下方「推理后端」为高级覆盖。"));
     m_mode->setCurrentIndex(0);
     // The fp16-AED「速度」model (2.2GB) is NOT bundled in the single-file installer.
-    // When its model isn't present, disable that mode so the user can't pick a missing
-    // model; if a user adds the AED model later, the mode auto-enables on next launch.
-    if (!discover_fp16_aed().ok()) {
+    // STARTUP (STEP 9): start the「速度(AED)」item DISABLED unconditionally (cheap, no fs
+    // touch) so show() paints before the directory scan — disabled is the safe initial state
+    // (a user can't pick a missing model in the one-frame window). Defer the actual
+    // discover_fp16_aed() filesystem probe to AFTER the first paint via singleShot(0); if the
+    // model is found, re-enable the item + restore its normal tooltip there.
+    if (auto* mdl = qobject_cast<QStandardItemModel*>(m_mode->model()))
+        if (auto* it = mdl->item(1)) it->setFlags(it->flags() & ~Qt::ItemIsEnabled);
+    m_mode->setItemData(1, tr("fp16 AED「速度」模型未随本版安装(为减小体积);添加该模型后自动启用。"), Qt::ToolTipRole);
+    const QString aedReadyTip = tr("fp16 AED 模型,最快但精度略低,需要 CUDA GPU。");
+    QTimer::singleShot(0, this, [this, aedReadyTip]() {
+        if (!discover_fp16_aed().ok()) return;   // model absent -> leave item disabled
         if (auto* mdl = qobject_cast<QStandardItemModel*>(m_mode->model()))
-            if (auto* it = mdl->item(1)) it->setFlags(it->flags() & ~Qt::ItemIsEnabled);
-        m_mode->setItemData(1, tr("fp16 AED「速度」模型未随本版安装(为减小体积);添加该模型后自动启用。"), Qt::ToolTipRole);
-    }
+            if (auto* it = mdl->item(1)) it->setFlags(it->flags() | Qt::ItemIsEnabled);
+        m_mode->setItemData(1, aedReadyTip, Qt::ToolTipRole);
+    });
 
     auto* providerLabel = new QLabel(tr("推理后端:"), bottomWidget);
     m_provider = new QComboBox(bottomWidget);
@@ -830,6 +840,17 @@ MainWindow::MainWindow(QWidget* parent)
             worker_,       &QObject::deleteLater);
 
     workerThread_->start();
+
+    // STARTUP (STEP 10): warm the hardware-probe cache on a detached background thread so the
+    // FIRST Start doesn't stall on nvidia-smi (probe_hardware blocks on WaitForSingleObject
+    // INFINITE). EngineWorker::run() reads this cache if ready, else probes inline. The store
+    // is guarded by the worker's own mutex + atomic ready flag (thread-safe). worker_ outlives
+    // this short probe (it is only deleteLater'd after workerThread_ finishes at app teardown,
+    // which the destructor joins). Detached so it never blocks window paint or shutdown.
+    {
+        EngineWorker* w = worker_;
+        std::thread([w]() { w->setCachedHardware(probe_hardware()); }).detach();
+    }
 
     // G14: per-second status repaint timer (created stopped; started in onWorkerStarted).
     m_tick = new QTimer(this);
@@ -961,6 +982,7 @@ void MainWindow::onStart()
 
     // G14: reset live-feedback snapshot + EMA state for this run.
     m_jobRunning      = true;
+    m_cancelRequested = false;   // STEP 4: fresh run -> the cancel-suppression flag is clear
     m_lastFilesDone   = 0;
     m_lastFilesTotal  = files.size();
     m_lastAudioSec    = 0.0;
@@ -999,6 +1021,7 @@ void MainWindow::onCancel()
     // while the worker winds down; onWorkerFinished writes the final summary.
     if (m_tick) m_tick->stop();
     setStatusText(tr("正在取消…"));
+    m_cancelRequested = true;   // STEP 4: suppress the clean-finish / terminal 100% clamp on cancel
     if (worker_) worker_->requestCancel();   // direct atomic store; thread-safe, takes effect immediately
 }
 
@@ -1060,20 +1083,26 @@ void MainWindow::onWorkerProgress(int filesDone, int filesTotal, double audioSec
     m_prevAudioSec = audioSec;
     m_prevRateTime = now;
 
-    // Segment-based progress: a concrete, determinate bar that reaches 100% when every
-    // segment is routed. segsTotal grows as files finish VAD, so early on (segsTotal==0,
-    // still decoding/VAD) we keep the marquee/indeterminate bar. Once segments exist we
-    // switch to a real percentage. This replaces the old speech-seconds/full-duration
-    // ratio that capped below 100% on files with silence and froze during long batches.
+    // STABLE TIME-based bar: numerator = monotonic speech-seconds transcribed (audioSec);
+    // denominator = totalAudioSec, the FIXED sum of per-file ffprobe durations gathered ONCE
+    // upfront (never grows, unlike segsTotal which streaming-VAD inflates for the whole run).
+    // So the bar NEVER regresses. segsDone/segsTotal are no longer used for the percentage —
+    // only the 已转写 N/M 段 text + 解码中/转写中 phase still read them.
     int pct;
-    if (segsTotal > 0) {
-        pct = std::min(100, static_cast<int>(100 * segsDone / segsTotal));
+    if (totalAudioSec > 0.0) {
+        pct = std::min(100, static_cast<int>(100.0 * audioSec / totalAudioSec));
+        // Speech-only numerator vs full-duration denominator caps a few % short on silent
+        // files; on a clean ALL-files-complete run, close that gap so the bar reaches 100%.
+        // Gated on !m_cancelRequested because the engine bumps files_done for cancelled files
+        // too (its finalize loop runs for every file), so filesDone==filesTotal is reachable
+        // on a cancelled batch — without this guard the clamp would wrongly force 100% on cancel.
+        if (!m_cancelRequested && filesDone == filesTotal && filesTotal > 0) pct = 100;
         // Leave busy/indeterminate mode on the first real progress, then show %.
         if (m_progress->maximum() == 0)
             m_progress->setRange(0, 100);
         m_progress->setValue(pct);
     } else {
-        // Still decoding/VAD — no segments queued yet; keep the indeterminate marquee.
+        // totalAudio unknown (all ffprobes failed) -> keep today's indeterminate marquee.
         pct = 0;
     }
 
@@ -1261,9 +1290,12 @@ void MainWindow::onWorkerFinished(int ok, int failed, int cancelled, double wall
     m_jobRunning = false;
     if (m_tick) m_tick->stop();
 
-    // Restore determinate mode before setting value
+    // Restore determinate mode before setting value. Only fill the bar to 100% on a clean
+    // finish; if anything was cancelled, leave the bar at its last partial value so a
+    // cancelled run does NOT show a misleading full bar (STEP 4 cancel correctness).
     m_progress->setRange(0, 100);
-    m_progress->setValue(100);
+    if (cancelled == 0)
+        m_progress->setValue(100);
     m_btnStart->setEnabled(true);
     m_btnCancel->setEnabled(false);
 

@@ -184,6 +184,10 @@ private:
     // next (possibly seconds-away) engine callback.
     // ------------------------------------------------------------------
     bool      m_jobRunning      = false;  // true between onWorkerStarted and onWorkerFinished
+    // STEP 4 (cancel correctness): set when the user requests cancel; cleared at each run
+    // start. Suppresses the filesDone==filesTotal "clean finish" 100% clamp AND the
+    // onWorkerFinished terminal 100% so a CANCELLED bar correctly stays below 100%.
+    bool      m_cancelRequested = false;
     int       m_lastFilesDone   = 0;
     int       m_lastFilesTotal  = 0;
     double    m_lastAudioSec     = 0.0;   // VAD-speech seconds transcribed so far
