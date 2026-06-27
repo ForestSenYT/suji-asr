@@ -48,6 +48,51 @@ static int parse_positive_int(const char* s) {
   }
 }
 
+// Case-insensitive substring test (ASCII). Filenames here are ASCII model names.
+static bool icontains(const std::string& hay, const std::string& needle) {
+  auto lower = [](std::string s){ for (auto& ch : s) ch = (char)tolower((unsigned char)ch); return s; };
+  return lower(hay).find(lower(needle)) != std::string::npos;
+}
+
+// Discover Qwen3-ASR model files inside `dir`. The exact filenames vary by release,
+// so match by substring on the .onnx files: *conv*front* -> conv_frontend,
+// *encoder* -> encoder, *decoder* -> decoder. The tokenizer is the DIRECTORY that
+// contains vocab.json (dir itself, or a subdir found via recursive search).
+// Fills the out_* params with absolute-ish paths (as found). Returns true on full
+// success; on any miss it logs EXACTLY which piece is missing and returns false.
+static bool discover_qwen3(const std::string& dir,
+                           std::string& out_conv, std::string& out_encoder,
+                           std::string& out_decoder, std::string& out_tokenizer) {
+  std::error_code ec;
+  // Scan top-level .onnx files (encoder/decoder/conv-frontend live at the top).
+  for (auto& e : fs::directory_iterator(dir, ec)) {
+    if (!e.is_regular_file()) continue;
+    const fs::path p = e.path();
+    if (p.extension() != ".onnx") continue;
+    const std::string name = p.filename().string();
+    if (icontains(name, "conv") && icontains(name, "front")) out_conv = p.string();
+    else if (icontains(name, "encoder"))                     out_encoder = p.string();
+    else if (icontains(name, "decoder"))                     out_decoder = p.string();
+  }
+  // Tokenizer directory = the dir containing vocab.json (dir itself or a subdir).
+  if (fs::exists(fs::path(dir) / "vocab.json")) {
+    out_tokenizer = dir;
+  } else {
+    for (auto& e : fs::recursive_directory_iterator(dir, ec)) {
+      if (e.is_regular_file() && e.path().filename() == "vocab.json") {
+        out_tokenizer = e.path().parent_path().string();
+        break;
+      }
+    }
+  }
+  bool ok = true;
+  if (out_encoder.empty())   { log_err("--qwen3-dir: no *encoder*.onnx found in " + dir); ok = false; }
+  if (out_decoder.empty())   { log_err("--qwen3-dir: no *decoder*.onnx found in " + dir); ok = false; }
+  if (out_conv.empty())      { log_err("--qwen3-dir: no *conv*front*.onnx found in " + dir); ok = false; }
+  if (out_tokenizer.empty()) { log_err("--qwen3-dir: no vocab.json (tokenizer dir) found under " + dir); ok = false; }
+  return ok;
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
   // Render UTF-8 log bytes (e.g. 解码/切分语音/Chinese filenames) correctly on a
@@ -56,7 +101,7 @@ int main(int argc, char** argv) {
   SetConsoleCP(CP_UTF8);
 #endif
   if (argc < 2) {
-    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--cpu-threads N] [--in-flight N] [--cuda-dll-dir <path>] [--asr-encoder <path> --asr-decoder <path> [--asr-tokens <path>]] [--srt-line N] [--resume|--no-resume]");
+    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--cpu-threads N] [--in-flight N] [--cuda-dll-dir <path>] [--asr-encoder <path> --asr-decoder <path> [--asr-tokens <path>]] [--qwen3-dir <dir>] [--srt-line N] [--resume|--no-resume]");
     return 2;
   }
 
@@ -83,6 +128,9 @@ int main(int argc, char** argv) {
   // P1: FireRedASR AED model overrides (encoder+decoder+tokens). When both
   // encoder and decoder are given, the engine uses the AED path (fire_red_asr).
   std::string aed_encoder, aed_decoder, aed_tokens;
+  // Qwen3-ASR model directory. When set, files are auto-discovered inside it and
+  // the engine takes the qwen3_asr path (precedence over AED/CTC + auto-fp16-AED).
+  std::string qwen3_dir;
   std::vector<std::string> inputs;
 
   for (int i = 1; i < argc; ++i) {
@@ -122,6 +170,10 @@ int main(int argc, char** argv) {
       aed_tokens = argv[++i];
       if (!fs::exists(aed_tokens)) { log_err("--asr-tokens file not found: " + aed_tokens); return 2; }
     }
+    else if (a == "--qwen3-dir"    && i + 1 < argc) {
+      qwen3_dir = argv[++i];
+      if (!fs::is_directory(qwen3_dir)) { log_err("--qwen3-dir is not a directory: " + qwen3_dir); return 2; }
+    }
     else if (a == "--srt-line"      && i + 1 < argc) {
       // 0 = no wrap (valid default); positive = max codepoints per line
       fsrt_line = parse_positive_int(argv[++i]);
@@ -159,6 +211,19 @@ int main(int argc, char** argv) {
     log_info("asr: FireRedASR AED (encoder+decoder) selected");
   }
   if (!aed_tokens.empty() && aed_encoder.empty()) c.tokens = aed_tokens;
+
+  // Qwen3-ASR: discover model files inside --qwen3-dir and wire the config. This
+  // takes PRECEDENCE over both the AED override and the auto-fp16-AED logic below
+  // (asr.cpp checks qwen3 first). Fail visibly (return 2) if any piece is missing.
+  if (!qwen3_dir.empty()) {
+    std::string conv, enc, dec, tok;
+    if (!discover_qwen3(qwen3_dir, conv, enc, dec, tok)) return 2;
+    c.qwen3_conv_frontend = conv;
+    c.qwen3_encoder       = enc;
+    c.qwen3_decoder       = dec;
+    c.qwen3_tokenizer     = tok;
+    log_info("asr: Qwen3-ASR selected (conv=" + conv + " enc=" + enc + " dec=" + dec + " tokenizer=" + tok + ")");
+  }
 
   // Resume partition: skip already-complete outputs
   std::vector<std::string> todo;
@@ -210,7 +275,8 @@ int main(int argc, char** argv) {
   {
     const bool user_forced_cpu_hetero = (prov == "cpu" || prov == "hetero");
     const bool user_gave_encoder      = !aed_encoder.empty();
-    if (!user_forced_cpu_hetero && !user_gave_encoder &&
+    const bool user_gave_qwen3        = !qwen3_dir.empty();
+    if (!user_forced_cpu_hetero && !user_gave_encoder && !user_gave_qwen3 &&
         hw.has_cuda_gpu && hw.cuda_runtime_available) {
       AedModel aed = discover_fp16_aed();
       if (aed.ok()) {
