@@ -195,6 +195,9 @@ void EngineWorker::run(QStringList inputs, QString outDir, QString provider,
     if (tune.provider == Provider::Cpu) {
         tune.num_threads = std::max(4, hw.cpu_threads);
         tune.batch       = std::min(4, std::max(1, hw.cpu_threads / 4));
+        // Qwen3 data-parallel CPU consumers (no-op for the GUI's fp16-AED/CTC models;
+        // qwen3_encoder is empty there). Keeps parity with batch_main.cpp's CPU path.
+        set_qwen3_cpu_consumers(tune, c, hw.cpu_threads);
     }
 
     // G12: apply GUI batch/in-flight overrides (0 = auto, leave decide() value as-is)

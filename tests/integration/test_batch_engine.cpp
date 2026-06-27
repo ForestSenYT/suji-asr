@@ -120,6 +120,58 @@ TEST_CASE("batch per-file segment progress sums to the global counters (Sigma-in
   CHECK(sum_total == final_total);
 }
 
+// Data-parallel CPU consumers (K>1): a clean multi-file run with K=2 must still route
+// every queued segment exactly once. The Σ-invariant (Σ per-file == global) and
+// segs_done==segs_total prove no segment is double-processed or dropped across the two
+// consumer sinks, and every file's transcript is non-empty after the cross-consumer merge.
+TEST_CASE("batch K=2 CPU consumers: clean run routes every segment once (Sigma-invariant)" * doctest::timeout(300)){
+  std::string w=md()+"/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/";
+  std::vector<std::string> inputs={ w+"0.wav", w+"1.wav", w+"2.wav" };
+  AutoTune tune; tune.provider=Provider::Cpu; tune.batch=4; tune.in_flight_files=2;
+  tune.num_threads=4; tune.cpu_consumers=2;
+  bool sigma_ok = true, ever_exceeded = false;
+  long long final_done=0, final_total=0;
+  auto res = transcribe_batch_files(inputs, cfg(), tune, [&](const BatchProgress& b){
+    long long sd=0, st=0;
+    for(const auto& f : b.files){ sd += f.segs_done; st += f.segs_total; }
+    if(sd != b.segs_done || st != b.segs_total) sigma_ok = false;
+    if(b.segs_done > b.segs_total) ever_exceeded = true;
+    final_done = b.segs_done; final_total = b.segs_total;
+  });
+  REQUIRE(res.size()==3);
+  for(auto& r : res){ CHECK(r.ok); CHECK_FALSE(r.transcript.full_text.empty()); }
+  CHECK(sigma_ok);                    // Σ per-file == global throughout (no double/drop)
+  CHECK_FALSE(ever_exceeded);         // segs_done <= segs_total always
+  CHECK(final_total > 0);
+  CHECK(final_done == final_total);   // every queued segment routed exactly once
+}
+
+// K=1 vs K=2 must produce identical transcripts when each segment is transcribed in
+// isolation (batch=1). batch=1 removes the only legitimate source of divergence — CTC
+// batch padding changes a batched segment's logits slightly, so grouping segments into
+// different batches across K can flip an ambiguous character. With batch=1 each segment is
+// its own batch regardless of K, so identical text PROVES the cross-consumer routing/merge
+// reproduces the single-consumer result exactly (correct per-file attribution + order).
+TEST_CASE("batch K=1 vs K=2 CPU consumers: identical transcripts at batch=1" * doctest::timeout(300)){
+  std::string w=md()+"/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25/test_wavs/";
+  std::vector<std::string> inputs={ w+"0.wav", w+"1.wav", w+"2.wav" };
+  auto run = [&](int K){
+    AutoTune tune; tune.provider=Provider::Cpu; tune.batch=1; tune.in_flight_files=2;
+    tune.num_threads=4; tune.cpu_consumers=K;
+    return transcribe_batch_files(inputs, cfg(), tune);
+  };
+  auto r1 = run(1);   // single-consumer (original path)
+  auto r2 = run(2);   // two data-parallel consumers
+  REQUIRE(r1.size()==3); REQUIRE(r2.size()==3);
+  for(size_t i=0;i<r1.size();++i){
+    CHECK(r1[i].ok); CHECK(r2[i].ok);
+    // Identical merged text -> cross-consumer concat+stable_sort reproduces the
+    // single-consumer ordering exactly (per-segment timestamps make the merge deterministic).
+    CHECK(r1[i].transcript.full_text == r2[i].transcript.full_text);
+    CHECK(r1[i].transcript.segments.size() == r2[i].transcript.segments.size());
+  }
+}
+
 TEST_CASE("live progress fires during transcription (not only at finalize)" * doctest::timeout(300)){
   // 0.wav has multiple VAD segments -> multiple consumer batches -> consumer cb fires > 1 time
   // finalize loop fires exactly 1 time (one file). So cb_count > 1 proves live emission.

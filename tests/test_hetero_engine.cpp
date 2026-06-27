@@ -67,6 +67,76 @@ TEST_CASE("hetero: two consumers drain queue with no double-processing") {
   CHECK((int)uni.size() == K);
 }
 
+// Data-parallel CPU consumers: K (>2) consumers draining ONE BoundedQueue must see
+// DISJOINT + COMPLETE work, exactly like the 2-consumer hetero case. This is the pure
+// (no-model) analogue proving the K-sink design (transcribe_batch_files_single) can't
+// double-process or drop a segment regardless of K. Mirrors the consumer loop shape.
+TEST_CASE("data-parallel: K consumers drain queue with no double-processing") {
+  for (int K : {3, 4}) {
+    const int M = 6000;
+    BoundedQueue<TaskStub> q(64);
+    std::vector<std::set<int>> seen((size_t)K);
+    auto consume = [&](std::set<int>& sink, int batch_max){
+      TaskStub first;
+      while(q.pop(first)){
+        std::vector<int> batch; batch.push_back(first.id);
+        TaskStub more;
+        while((int)batch.size() < batch_max && q.try_pop(more)) batch.push_back(more.id);
+        for(int id : batch) sink.insert(id);
+      }
+    };
+    std::vector<std::thread> ts;
+    for(int k=0;k<K;k++) ts.emplace_back([&,k]{ consume(seen[k], 4 + k); });  // varied batch sizes
+    for(int i=0;i<M;i++) q.push(TaskStub{i});
+    q.close();
+    for(auto& t : ts) t.join();
+
+    // Pairwise intersections empty: a single segment is popped by exactly one consumer.
+    for(int a=0;a<K;a++) for(int b=a+1;b<K;b++){
+      std::vector<int> inter;
+      std::set_intersection(seen[a].begin(), seen[a].end(), seen[b].begin(), seen[b].end(),
+                            std::back_inserter(inter));
+      CHECK(inter.empty());
+    }
+    // Union complete: every pushed task processed exactly once across all K consumers.
+    std::set<int> uni; size_t total = 0;
+    for(int k=0;k<K;k++){ uni.insert(seen[k].begin(), seen[k].end()); total += seen[k].size(); }
+    CHECK((int)total == M);            // no double-count
+    CHECK((int)uni.size() == M);       // no drop
+  }
+}
+
+// Data-parallel: K per-consumer token sinks, concatenated + stable-sorted by .start,
+// must equal the single-array baseline through merge. This is the K-sink generalisation
+// of the hetero 2-sink merge test — proves the finalize concat-then-merge is order-correct
+// regardless of which of the K consumers processed which segment.
+TEST_CASE("data-parallel: K per-consumer token sinks merge equal single-array baseline") {
+  const int K = 4;
+  std::vector<std::vector<Token>> sinks((size_t)K);
+  std::vector<Token> baseline;
+  auto mk = [](const char* s, double t){ Token x; x.text=s; x.start=t; return x; };
+  const double ts[]  = {0.0,0.3,0.6,0.9,1.2,1.5,2.8,3.1};
+  const char*  txt[] = {u8"你",u8"好",u8"世",u8"界",u8"今",u8"天",u8"再",u8"见"};
+  for(int i=0;i<8;i++){
+    Token tk = mk(txt[i], ts[i]);
+    baseline.push_back(tk);
+    sinks[i % K].push_back(tk);          // round-robin across K consumers
+  }
+  // finalize: concat all K sinks, stable-sort by .start, merge.
+  std::vector<Token> merged;
+  for(int k=0;k<K;k++) merged.insert(merged.end(), sinks[k].begin(), sinks[k].end());
+  std::stable_sort(merged.begin(), merged.end(),
+                   [](const Token&a,const Token&b){ return a.start<b.start; });
+  for(size_t i=1;i<merged.size();++i) CHECK(merged[i-1].start <= merged[i].start);
+  auto seg_h = merge_tokens(merged, 1.0, 30.0);
+  auto seg_b = merge_tokens(baseline, 1.0, 30.0);
+  REQUIRE(seg_h.size() == seg_b.size());
+  for(size_t i=0;i<seg_h.size();++i){
+    CHECK(seg_h[i].text == seg_b[i].text);
+    CHECK(seg_h[i].start == doctest::Approx(seg_b[i].start));
+  }
+}
+
 // P5 gate (REAL) — drives the PRODUCTION helpers form_next_batch()/flush_held() from
 // batch_form.h (the same code both consumers in batch_engine.cpp call), so this test
 // FAILS if the bucket=(N==1) gate is removed or inverted. The helper is gated by `bucket`:
@@ -330,6 +400,31 @@ TEST_CASE("R6: clean run leaves seg_pending zero and files stay ok") {
     bool reclassified = classify_cancelled(cancel_fired, seg_pending[i].load(),
                                            produced_complete[i], file_ok[i]);
     CHECK_FALSE(reclassified);
+  }
+}
+
+// Data-parallel K>1 + R6: with K consumers each discarding its popped `first` on cancel
+// (and held buffers + still-queued segments), seg_pending stays elevated for the file, so
+// finalize classifies it cancelled (NOT a falsely-ok truncated transcript). seg_pending is
+// shared across all K consumers (one atomic per file), so the classification is identical
+// to the single-consumer case regardless of K — this asserts that invariant explicitly.
+TEST_CASE("data-parallel K>1 + R6: per-consumer discarded segments keep file cancelled") {
+  for (int K : {2, 3, 4}) {
+    const int total = 20;                 // file 0 has 20 segments, all pushed
+    std::atomic<int> seg_pending{0};
+    for (int i = 0; i < total; ++i) seg_pending.fetch_add(1);
+    bool produced_complete = true;
+    // Each of the K consumers routed some segments, then on cancel discarded its popped
+    // `first` (and any held) WITHOUT decrementing. Simulate: K consumers each routed 2.
+    const int routed_per_consumer = 2;
+    for (int k = 0; k < K; ++k)
+      for (int i = 0; i < routed_per_consumer; ++i) seg_pending.fetch_sub(1);
+    // remaining (total - K*routed) segments stay pending (discarded firsts + still-queued).
+    CHECK(seg_pending.load() == total - K * routed_per_consumer);
+    CHECK(seg_pending.load() > 0);        // truncation window: at least one segment unrouted
+    bool says_cancelled = classify_cancelled(/*cancel_fired=*/true, seg_pending.load(),
+                                             produced_complete, /*currently_ok=*/true);
+    CHECK(says_cancelled);                // file is cancelled, not falsely reported ok (R6)
   }
 }
 

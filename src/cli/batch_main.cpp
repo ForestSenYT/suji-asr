@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
   SetConsoleCP(CP_UTF8);
 #endif
   if (argc < 2) {
-    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--cpu-threads N] [--in-flight N] [--cuda-dll-dir <path>] [--asr-encoder <path> --asr-decoder <path> [--asr-tokens <path>]] [--qwen3-dir <dir>] [--hotwords <file>] [--srt-line N] [--resume|--no-resume]");
+    std::puts("usage: suji_batch <dir|files...> [-o out_dir] [--provider auto|cpu|cuda|hetero] [--batch N] [--cpu-batch N] [--gpu-batch N] [--cpu-threads N] [--cpu-consumers N] [--in-flight N] [--cuda-dll-dir <path>] [--asr-encoder <path> --asr-decoder <path> [--asr-tokens <path>]] [--qwen3-dir <dir>] [--hotwords <file>] [--srt-line N] [--resume|--no-resume]");
     return 2;
   }
 
@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
   int         fcpu_batch     = 0;    // --cpu-batch
   int         fgpu_batch     = 0;    // --gpu-batch
   int         fcpu_threads   = 0;    // --cpu-threads (overrides hetero cpu_asr_threads)
+  int         fcpu_consumers  = 0;   // --cpu-consumers (K data-parallel CPU recognizers)
   int         finflight      = 0;
   std::string cuda_dll_dir_override;
   bool        resume         = true;
@@ -155,6 +156,10 @@ int main(int argc, char** argv) {
     else if (a == "--cpu-threads"  && i + 1 < argc) {
       fcpu_threads = parse_positive_int(argv[++i]);
       if (fcpu_threads == 0) { log_err("--cpu-threads requires a positive integer, got: " + std::string(argv[i])); return 2; }
+    }
+    else if (a == "--cpu-consumers" && i + 1 < argc) {
+      fcpu_consumers = parse_positive_int(argv[++i]);
+      if (fcpu_consumers == 0) { log_err("--cpu-consumers requires a positive integer, got: " + std::string(argv[i])); return 2; }
     }
     else if (a == "--in-flight"    && i + 1 < argc) {
       finflight = parse_positive_int(argv[++i]);
@@ -322,8 +327,9 @@ int main(int argc, char** argv) {
   if (fbatch    > 0) { tune.batch = fbatch; tune.gpu_batch = fbatch; }
   if (fgpu_batch > 0) { tune.gpu_batch = fgpu_batch; tune.batch = fgpu_batch; }
   if (fcpu_batch > 0)  tune.cpu_batch = fcpu_batch;
-  // --cpu-threads overrides the hetero CPU-recognizer thread count (and its legacy
-  // num_threads mirror). Lets the user reclaim idle cores during the long ASR phase.
+  // --cpu-threads on the HETERO path overrides the CPU-recognizer thread count (the CPU
+  // recompute below re-derives num_threads for the CPU path, where --cpu-threads is
+  // re-applied AFTER the Qwen3 split so it still wins).
   if (fcpu_threads > 0) { tune.cpu_asr_threads = fcpu_threads; tune.num_threads = fcpu_threads; }
   if (finflight > 0)   tune.in_flight_files = finflight;
 
@@ -332,6 +338,18 @@ int main(int argc, char** argv) {
     tune.num_threads = std::max(4, hw.cpu_threads);
     // D8: recompute batch for CPU (GPU-decided value may be too large for CPU)
     tune.batch = std::min(4, std::max(1, hw.cpu_threads / 4));
+    // Qwen3 data-parallel CPU consumers: set K + split num_threads ~= cores/K (no-op for
+    // other models). Runs AFTER the CPU recompute (which reset num_threads above) so the
+    // per-consumer thread split sticks. Explicit --cpu-consumers / --cpu-threads win below.
+    set_qwen3_cpu_consumers(tune, c, hw.cpu_threads);
+    if (fcpu_consumers > 0) {
+      tune.cpu_consumers = fcpu_consumers;
+      // No explicit --cpu-threads -> re-split cores across the chosen K so K consumers
+      // don't oversubscribe (each gets ~cores/K). --cpu-threads (below) overrides this.
+      if (fcpu_threads == 0)
+        tune.num_threads = std::max(2, hw.cpu_threads / fcpu_consumers);
+    }
+    if (fcpu_threads > 0) tune.num_threads = fcpu_threads;   // explicit per-consumer threads win
   }
 
   log_info("hw: gpu=" + std::string(hw.has_cuda_gpu ? hw.gpu_name : "none")
@@ -351,6 +369,7 @@ int main(int argc, char** argv) {
       + " batch=" + std::to_string(tune.batch)
       + " in_flight=" + std::to_string(tune.in_flight_files)
       + " threads=" + std::to_string(tune.num_threads)
+      + " cpu_consumers=" + std::to_string(tune.cpu_consumers)
       + " files=" + std::to_string(todo.size()));
   }
 

@@ -255,6 +255,61 @@ TEST_CASE("fill_hetero: few-files split never doubles core count") {
   }
 }
 
+// ---- data-parallel CPU consumers: set_qwen3_cpu_consumers ----
+
+// Qwen3 + CPU provider -> K>1 consumers with the cores split across them.
+TEST_CASE("set_qwen3_cpu_consumers: Qwen3 on CPU splits cores into K consumers") {
+  EngineConfig cfg; cfg.qwen3_encoder = "encoder.int8.onnx";   // marks Qwen3 active
+  AutoTune t; t.provider = Provider::Cpu; t.num_threads = 16;
+  set_qwen3_cpu_consumers(t, cfg, 16);
+  CHECK(t.cpu_consumers == 3);                 // 16 logical -> clamp(16/2,1,3)=3
+  CHECK(t.num_threads == 5);                   // clamp(16/3,2,16)=5 per consumer
+  CHECK(t.cpu_consumers * t.num_threads <= 16 + t.cpu_consumers);  // ~no oversubscription
+}
+
+// Non-Qwen3 models must NOT get extra consumers (they batch fine in sherpa).
+TEST_CASE("set_qwen3_cpu_consumers: non-Qwen3 model keeps cpu_consumers=1 (no-op)") {
+  EngineConfig cfg;   // qwen3_encoder empty -> not Qwen3
+  AutoTune t; t.provider = Provider::Cpu; t.num_threads = 16;
+  set_qwen3_cpu_consumers(t, cfg, 16);
+  CHECK(t.cpu_consumers == 1);
+  CHECK(t.num_threads == 16);                  // untouched
+}
+
+// Qwen3 on a non-CPU provider runs a single recognizer (int8 won't use CUDA EP anyway).
+TEST_CASE("set_qwen3_cpu_consumers: Qwen3 on CUDA keeps cpu_consumers=1 (no-op)") {
+  EngineConfig cfg; cfg.qwen3_encoder = "encoder.int8.onnx";
+  AutoTune t; t.provider = Provider::Cuda; t.num_threads = 1;
+  set_qwen3_cpu_consumers(t, cfg, 16);
+  CHECK(t.cpu_consumers == 1);
+  CHECK(t.num_threads == 1);                    // untouched
+}
+
+// Tiny box (few logical cores): K must fall back toward 1 so each consumer keeps >=2 threads.
+TEST_CASE("set_qwen3_cpu_consumers: tiny box falls back to 1 consumer") {
+  EngineConfig cfg; cfg.qwen3_encoder = "encoder.int8.onnx";
+  AutoTune t; t.provider = Provider::Cpu; t.num_threads = 4;
+  set_qwen3_cpu_consumers(t, cfg, 2);          // 2 logical -> clamp(1,1,3)=1
+  CHECK(t.cpu_consumers == 1);
+  CHECK(t.num_threads == 2);                    // clamp(2/1,2,2)=2
+}
+
+// Default decide() on a CPU box with Qwen3 cfg picks the multi-consumer split.
+TEST_CASE("decide: CPU + Qwen3 cfg sets cpu_consumers>1") {
+  EngineConfig cfg; cfg.qwen3_encoder = "encoder.int8.onnx";
+  auto t = decide(hw(false, 0, 16, 40000), cfg);   // no GPU -> CPU path
+  CHECK(t.provider == Provider::Cpu);
+  CHECK(t.cpu_consumers == 3);
+  CHECK(t.num_threads == 5);
+}
+
+// Default decide() on a CPU box WITHOUT Qwen3 keeps the single-consumer default.
+TEST_CASE("decide: CPU without Qwen3 keeps cpu_consumers=1") {
+  auto t = decide(hw(false, 0, 16, 40000), EngineConfig{});
+  CHECK(t.provider == Provider::Cpu);
+  CHECK(t.cpu_consumers == 1);
+}
+
 // ---- T5: decide() optional max_batch / max_threads caps ----
 
 TEST_CASE("T5: max_batch=0 leaves batch unchanged (auto)") {
